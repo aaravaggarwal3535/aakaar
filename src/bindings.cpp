@@ -1,20 +1,26 @@
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <memory>
 #include "tensor.h"
+#include "allocator.h"
 
 namespace py = pybind11;
 
-// Forward declaration
-std::shared_ptr<Tensor> run_curand_uniform(int size, unsigned long long seed);
+void run_curand_uniform(std::shared_ptr<Tensor> t, unsigned long long seed);
+void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed);
+
+void empty_cache() {
+    CachingAllocator::get_instance().empty_cache();
+}
 
 PYBIND11_MODULE(_C, m) {
-    
-    // 1. Expose our Custom Tensor Class to Python
     py::class_<Tensor, std::shared_ptr<Tensor>>(m, "Tensor")
-        .def(py::init<int>()) // Allow creation via aakaar._C.Tensor(size)
-        .def_readonly("size", &Tensor::size)
-        .def("cpu", &Tensor::cpu, "Copy tensor data to a CPU NumPy array");
+        .def(py::init<int, std::string>())
+        .def_readonly("device", &Tensor::device)
+        .def("to_numpy", &Tensor::to_numpy);
 
-    // 2. Expose the random function
-    m.def("generate_random", &run_curand_uniform, "Generate random numbers directly on the GPU");
+    m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");
+    m.def("fill_cpu_random", &fill_cpu_random, "Fill CPU Tensor with random numbers");
+
+    m.def("empty_cache", &empty_cache, "Release cached GPU memory");
 }

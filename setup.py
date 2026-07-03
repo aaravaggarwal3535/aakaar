@@ -42,7 +42,7 @@ class CUDABuildExtension(build_ext):
 # Define the Python Extension
 aakaar_ext = Extension(
     'aakaar._C',
-    sources=['src/bindings.cpp', 'src/random_kernel.cu'],
+    sources=['src/bindings.cpp', 'src/cpu_kernel.cpp', 'src/random_kernel.cu'],
     include_dirs=[
         pybind11.get_include(),
         '/usr/local/cuda/include'
@@ -50,7 +50,7 @@ aakaar_ext = Extension(
     library_dirs=[
         '/usr/local/cuda/lib64'
     ],
-    libraries=['curand', 'cudart'], # Added cudart here
+    libraries=['curand', 'cudart'],
     language='c++'
 )
 

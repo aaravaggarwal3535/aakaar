@@ -1,8 +1,11 @@
 #pragma once
 #include <cuda_runtime.h>
+#include <string>
+#include <stdexcept>
+#include <iostream>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
-#include <iostream>
+#include "allocator.h" // Your CachingAllocator
 
 namespace py = pybind11;
 
@@ -10,30 +13,39 @@ class Tensor {
 public:
     float* data_ptr;
     int size;
+    std::string device;
 
-    // Constructor: When created, allocate GPU memory
-    Tensor(int s) : size(s) {
-        cudaError_t err = cudaMalloc((void**)&data_ptr, size * sizeof(float));
-        if (err != cudaSuccess) {
-            throw std::runtime_error("CUDA Malloc failed!");
+    Tensor(int s, std::string dev) : size(s), device(dev) {
+        if (device == "cuda") {
+            data_ptr = CachingAllocator::get_instance().allocate(size);
+        } else {
+            data_ptr = new float[size]; // Standard heap allocation
         }
     }
 
-    // Destructor: When Python deletes this object, free the GPU memory!
     ~Tensor() {
-        cudaFree(data_ptr);
+        if (device == "cuda") {
+            CachingAllocator::get_instance().free(data_ptr, size);
+        } else {
+            delete[] data_ptr;
+        }
     }
 
-    // Helper method: Bring data across the PCI-e bus to the CPU as a NumPy array
-    py::array_t<float> cpu() {
-        // Allocate an empty NumPy array
+    // Copy data back to a numpy array on the host, regardless of device
+    py::array_t<float> to_numpy() {
         py::array_t<float> result(size);
-        py::buffer_info buf = result.request();
-        float* ptr = static_cast<float*>(buf.ptr);
+        auto buf = result.mutable_data();
 
-        // Copy from Device (GPU) to Host (CPU)
-        cudaMemcpy(ptr, data_ptr, size * sizeof(float), cudaMemcpyDeviceToHost);
-        
+        if (device == "cuda") {
+            cudaError_t err = cudaMemcpy(buf, data_ptr, size * sizeof(float),
+                                          cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) {
+                throw std::runtime_error("cudaMemcpy failed in to_numpy(): " +
+                                          std::string(cudaGetErrorString(err)));
+            }
+        } else {
+            std::memcpy(buf, data_ptr, size * sizeof(float));
+        }
         return result;
     }
 };
