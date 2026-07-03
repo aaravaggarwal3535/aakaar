@@ -29,7 +29,7 @@ import aakaar
 
 # Initialize the CUDA engine and allocate a GPU Tensor
 print("Generating 100,000 random numbers on the GPU...")
-data = aakaar.rand(100000, seed=1337)
+data = aakaar.rand(100000, device="cpu", seed=1337)
 
 # The data remains on the GPU as an Aakaar Tensor
 print(type(data)) 
