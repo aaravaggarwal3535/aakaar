@@ -1,0 +1,17 @@
+# Python environment
+.venv/
+__pycache__/
+*.py[cod]
+
+# Build directories
+build/
+dist/
+*.egg-info/
+
+# Compiled C++/CUDA Binaries
+*.o
+*.so
+*.pyd
+
+# OS generated files
+.DS_Store
