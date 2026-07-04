@@ -17,15 +17,21 @@ _add_windows_cuda_dll_dirs()
 from . import _C
 import numpy as np
 
-def rand(size: int, device: str = "cpu", seed: int = 42):
+def _normalize_shape(size):
+    if isinstance(size, int):
+        return [size]
+    return list(size)
+
+def rand(size, device: str = "cpu", seed: int = 42):
     if device == "cuda" and not _C.HAS_CUDA:
         raise RuntimeError(
             "This installation of aakaar was built without CUDA support. "
             "Install on a machine with the CUDA toolkit available, or use device='cpu'."
         )
-    t = _C.Tensor(size, device)
+    shape = _normalize_shape(size)
+    t = _C.Tensor(shape, device)
     if device == "cuda":
         _C.generate_random(t, seed)
     else:
         _C.fill_cpu_random(t, seed)
-    return t  # stays an aakaar Tensor — no numpy conversion here
+    return t

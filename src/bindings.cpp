@@ -15,9 +15,10 @@ void empty_cache() { CachingAllocator::get_instance().empty_cache(); }
 
 PYBIND11_MODULE(_C, m) {
     py::class_<Tensor, std::shared_ptr<Tensor>>(m, "Tensor")
-        .def(py::init<int, std::string>())
+        .def(py::init<std::vector<int>, std::string>())
         .def_readonly("device", &Tensor::device)
         .def_readonly("size", &Tensor::size)
+        .def_readonly("shape", &Tensor::shape)
         .def("to_numpy", &Tensor::to_numpy)
         .def("__repr__", &Tensor::repr)
         .def("__str__", &Tensor::repr)
