@@ -25,9 +25,14 @@ from . import _C
 import numpy as np
 
 def rand(size: int, device: str = "cpu", seed: int = 42):
+    if device == "cuda" and not _C.HAS_CUDA:
+        raise RuntimeError(
+            "This installation of aakaar was built without CUDA support. "
+            "Install on a machine with the CUDA toolkit available, or use device='cpu'."
+        )
     t = _C.Tensor(size, device)
     if device == "cuda":
         _C.generate_random(t, seed)
     else:
         _C.fill_cpu_random(t, seed)
-    return t.to_numpy()
+    return t  # stays an aakaar Tensor — no numpy conversion here
