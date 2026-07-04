@@ -1,23 +1,16 @@
 import os
 import sys
-import glob
 
 def _add_windows_cuda_dll_dirs():
-    """On Windows, point the DLL loader at the CUDA runtime DLLs shipped
-    inside the nvidia-*-cu12 pip packages, since Windows won't find them
-    on its own the way Linux does via RPATH."""
     if sys.platform != "win32":
         return
-    for pkg in ("nvidia/cuda_runtime", "nvidia/curand"):
-        pattern = os.path.join(sys.prefix, "Lib", "site-packages", pkg, "bin")
-        if os.path.isdir(pattern):
-            os.add_dll_directory(pattern)
-        # also check user-site installs (pip install --user, common on Windows)
-        user_pattern = os.path.join(os.path.expanduser("~"), "AppData", "Roaming",
-                                     "Python", f"Python{sys.version_info.major}{sys.version_info.minor}",
-                                     "site-packages", pkg, "bin")
-        if os.path.isdir(user_pattern):
-            os.add_dll_directory(user_pattern)
+    import site
+    search_roots = site.getsitepackages() + [site.getusersitepackages()]
+    for root in search_roots:
+        for pkg in ("nvidia/cuda_runtime", "nvidia/curand"):
+            bin_dir = os.path.join(root, *pkg.split("/"), "bin")
+            if os.path.isdir(bin_dir):
+                os.add_dll_directory(bin_dir)
 
 _add_windows_cuda_dll_dirs()
 
