@@ -70,7 +70,7 @@ aakaar_ext = Extension(
 
 setup(
     name="aakaar",
-    version="0.1.3",
+    version="0.1.5",
     author="Aarav Aggarwal",
     description="A custom standalone ML library featuring CUDA-accelerated operations (CPU fallback supported).",
     packages=["aakaar"],

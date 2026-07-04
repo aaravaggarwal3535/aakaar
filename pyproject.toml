@@ -10,5 +10,3 @@ readme = "README.md"
 authors = [{name = "Aarav Aggarwal"}]
 requires-python = ">=3.9"
 dependencies = ["numpy", "nvidia-curand-cu12", "nvidia-cuda-runtime-cu12"]
-[project.optional-dependencies]
-cuda = ["nvidia-curand-cu12", "nvidia-cuda-runtime-cu12"]
