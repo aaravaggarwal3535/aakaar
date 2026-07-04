@@ -1,5 +1,3 @@
-cat > MANIFEST.in << 'EOF'
 include src/*.h
 include src/*.cuh
 include README.md
-EOF

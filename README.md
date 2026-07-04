@@ -17,10 +17,7 @@ To build Aakaar from source, you must have the NVIDIA CUDA Toolkit (nvcc) and a 
 
 1. Clone the repository:
 ```bash
-git clone [https://github.com/YOUR_USERNAME/aakaar.git](https://github.com/YOUR_USERNAME/aakaar.git)
-cd aakaar
-pip install setuptools wheel pybind11
-pip install -e .
+pip install aakaar
 ```
 
 quick start
