@@ -1,5 +1,5 @@
 # Python environment
-.venv/
+.venv*/
 __pycache__/
 *.py[cod]
 
@@ -18,3 +18,5 @@ dist/
 
 *.pypirc.pypirc
 .pypirc
+
+build_script.txt

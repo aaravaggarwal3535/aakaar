@@ -1,9 +1,9 @@
 #pragma once
 #include <string>
 #include <vector>
-#include <numeric>
 #include <stdexcept>
 #include <cstring>
+#include <memory>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -17,68 +17,126 @@ namespace py = pybind11;
 
 class Tensor {
 public:
-    float* data_ptr;
-    int size;                     // total element count (product of shape)
-    std::vector<int> shape;       // e.g. {100, 100}
+    float* data_ptr;               // points at the first element THIS tensor/view sees
+    int size;                      // element count of this view
+    std::vector<int> shape;
+    std::vector<int> strides;      // in elements
     std::string device;
 
-    // Construct from a shape vector, e.g. {100, 100} or {50}
-    Tensor(std::vector<int> shp, std::string dev) : shape(shp), device(dev) {
+    std::shared_ptr<Tensor> base;  // non-null => this is a view; keeps owner alive
+    float* owned_ptr = nullptr;    // the actually-allocated buffer (only if base == nullptr)
+
+    static std::vector<int> contiguous_strides(const std::vector<int>& shp) {
+        std::vector<int> st(shp.size());
+        int acc = 1;
+        for (int i = (int)shp.size() - 1; i >= 0; --i) {
+            st[i] = acc;
+            acc *= shp[i];
+        }
+        return st;
+    }
+
+    // Fresh allocation (used by rand(), matmul() results, etc.)
+    Tensor(std::vector<int> shp, std::string dev) : shape(shp), device(dev), base(nullptr) {
         size = 1;
         for (int d : shape) {
             if (d <= 0) throw std::invalid_argument("Tensor dimensions must be positive");
             size *= d;
         }
+        strides = contiguous_strides(shape);
         if (device == "cuda") {
 #ifdef AAKAAR_NO_CUDA
             throw std::runtime_error("This build of aakaar was compiled without CUDA support. "
                                       "Use device='cpu' instead.");
 #else
-            data_ptr = CachingAllocator::get_instance().allocate(size);
+            owned_ptr = CachingAllocator::get_instance().allocate(size);
 #endif
         } else {
-            data_ptr = new float[size];
+            owned_ptr = new float[size];
         }
+        data_ptr = owned_ptr;
+    }
+
+    // View constructor: shares memory of `parent` at element offset `off`
+    Tensor(std::shared_ptr<Tensor> parent, int off, std::vector<int> shp, std::vector<int> strd)
+        : shape(shp), strides(strd), device(parent->device), base(parent) {
+        size = 1;
+        for (int d : shape) size *= d;
+        data_ptr = parent->data_ptr + off;
     }
 
     ~Tensor() {
-        if (device == "cuda") {
+        if (base == nullptr) {   // only owners free memory; views just drop their shared_ptr ref
+            if (device == "cuda") {
 #ifndef AAKAAR_NO_CUDA
-            CachingAllocator::get_instance().free(data_ptr, size);
+                CachingAllocator::get_instance().free(owned_ptr, size);
 #endif
-        } else {
-            delete[] data_ptr;
+            } else {
+                delete[] owned_ptr;
+            }
         }
     }
 
-    py::array_t<float> to_numpy() {
-        py::array_t<float> result(shape);   // gives numpy the real shape, not flat
-        auto buf = result.mutable_data();
-#ifndef AAKAAR_NO_CUDA
-        if (device == "cuda") {
-            cudaMemcpy(buf, data_ptr, size * sizeof(float), cudaMemcpyDeviceToHost);
-            return result;
-        }
-#endif
-        std::memcpy(buf, data_ptr, size * sizeof(float));
-        return result;
+    bool is_contiguous() const {
+        return strides == contiguous_strides(shape);
     }
 
-    float get_item(int index) {
-        if (index < 0 || index >= size) {
-            throw std::out_of_range("Tensor index out of range");
+    float get_scalar(const std::vector<int>& idx) {
+        if (idx.size() != shape.size())
+            throw std::out_of_range("Index dimensionality does not match tensor shape");
+        int off = 0;
+        for (size_t i = 0; i < idx.size(); ++i) {
+            if (idx[i] < 0 || idx[i] >= shape[i])
+                throw std::out_of_range("Tensor index out of range");
+            off += idx[i] * strides[i];
         }
         float value;
 #ifndef AAKAAR_NO_CUDA
         if (device == "cuda") {
-            cudaMemcpy(&value, data_ptr + index, sizeof(float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&value, data_ptr + off, sizeof(float), cudaMemcpyDeviceToHost);
             return value;
         }
 #endif
-        return data_ptr[index];
+        return data_ptr[off];
     }
 
-    std::string shape_str() {
+    // Correctly handles non-contiguous strided views on both CPU and CUDA
+    py::array_t<float> to_numpy() {
+        py::array_t<float> result(shape);
+        float* out = result.mutable_data();
+
+        std::vector<float> host_buf;
+        const float* src;
+
+        if (device == "cuda") {
+#ifndef AAKAAR_NO_CUDA
+            int max_off = 0;
+            for (size_t i = 0; i < shape.size(); ++i)
+                if (shape[i] > 0) max_off += (shape[i] - 1) * strides[i];
+            host_buf.resize(max_off + 1);
+            cudaMemcpy(host_buf.data(), data_ptr, (max_off + 1) * sizeof(float), cudaMemcpyDeviceToHost);
+            src = host_buf.data();
+#else
+            throw std::runtime_error("CUDA tensor on a CPU-only build");
+#endif
+        } else {
+            src = data_ptr;
+        }
+
+        std::vector<int> idx(shape.size(), 0);
+        for (int flat = 0; flat < size; ++flat) {
+            int off = 0;
+            for (size_t d = 0; d < shape.size(); ++d) off += idx[d] * strides[d];
+            out[flat] = src[off];
+            for (int d = (int)shape.size() - 1; d >= 0; --d) {
+                if (++idx[d] < shape[d]) break;
+                idx[d] = 0;
+            }
+        }
+        return result;
+    }
+
+    std::string shape_str() const {
         std::string s = "(";
         for (size_t i = 0; i < shape.size(); ++i) {
             s += std::to_string(shape[i]);
@@ -91,9 +149,14 @@ public:
     std::string repr() {
         std::string out = "aakaar.Tensor([";
         int preview = size < 6 ? size : 6;
+        std::vector<int> idx(shape.size(), 0);
         for (int i = 0; i < preview; ++i) {
-            out += std::to_string(get_item(i));
+            out += std::to_string(get_scalar(idx));
             if (i < preview - 1) out += ", ";
+            for (int d = (int)shape.size() - 1; d >= 0; --d) {
+                if (++idx[d] < shape[d]) break;
+                idx[d] = 0;
+            }
         }
         if (size > preview) out += ", ...";
         out += "], device='" + device + "', shape=" + shape_str() + ")";

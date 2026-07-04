@@ -7,8 +7,20 @@ def _add_windows_cuda_dll_dirs():
     import site
     search_roots = site.getsitepackages() + [site.getusersitepackages()]
     for root in search_roots:
-        for pkg in ("nvidia/cuda_runtime", "nvidia/curand"):
-            bin_dir = os.path.join(root, *pkg.split("/"), "bin")
+        nvidia_root = os.path.join(root, "nvidia")
+        if not os.path.isdir(nvidia_root):
+            continue
+
+        # New unversioned CUDA-13+ packages: consolidated nvidia/cuXX/bin/x86_64/
+        for entry in os.listdir(nvidia_root):
+            if entry.startswith("cu") and entry[2:].isdigit():
+                consolidated_bin = os.path.join(nvidia_root, entry, "bin", "x86_64")
+                if os.path.isdir(consolidated_bin):
+                    os.add_dll_directory(consolidated_bin)
+
+        # Old per-package CUDA-12 style: nvidia/<pkg>/bin/
+        for pkg in ("cuda_runtime", "curand", "cublas", "cuda_nvrtc"):
+            bin_dir = os.path.join(nvidia_root, pkg, "bin")
             if os.path.isdir(bin_dir):
                 os.add_dll_directory(bin_dir)
 
