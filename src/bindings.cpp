@@ -6,10 +6,12 @@
 namespace py = pybind11;
 
 void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed);
+std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 
 #ifndef AAKAAR_NO_CUDA
 #include "allocator.h"
 void run_curand_uniform(std::shared_ptr<Tensor> t, unsigned long long seed);
+std::shared_ptr<Tensor> run_cublas_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 void empty_cache() { CachingAllocator::get_instance().empty_cache(); }
 #endif
 
@@ -29,9 +31,11 @@ PYBIND11_MODULE(_C, m) {
         });
 
     m.def("fill_cpu_random", &fill_cpu_random, "Fill CPU Tensor with random numbers");
+    m.def("cpu_matmul", &run_cpu_matmul, "CPU matrix multiplication");
 
 #ifndef AAKAAR_NO_CUDA
     m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");
+    m.def("cuda_matmul", &run_cublas_matmul, "cuBLAS GPU matrix multiplication");
     m.def("empty_cache", &empty_cache, "Release cached GPU memory");
     m.attr("HAS_CUDA") = true;
 #else

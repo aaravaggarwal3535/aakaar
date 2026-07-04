@@ -48,7 +48,7 @@ class CUDABuildExtension(build_ext):
                     objects.append(obj_file)
                 ext.include_dirs.append(cuda_include)
                 ext.library_dirs.append(cuda_lib)
-                ext.libraries.extend(["curand", "cudart"])
+                ext.libraries.extend(["curand", "cudart", "cublas"])
             else:
                 # No CUDA toolkit: skip .cu sources entirely, CPU-only build
                 print("No nvcc found — building CPU-only extension (no CUDA support).")
@@ -62,7 +62,7 @@ class CUDABuildExtension(build_ext):
 
 aakaar_ext = Extension(
     "aakaar._C",
-    sources=["src/bindings.cpp", "src/cpu_kernel.cpp", "src/random_kernel.cu"],
+    sources=["src/bindings.cpp", "src/cpu_kernel.cpp", "src/random_kernel.cu", 'src/matmul_kernel.cu'],
     include_dirs=[pybind11.get_include()],
     libraries=[],  # populated conditionally above
     language="c++",
@@ -70,7 +70,7 @@ aakaar_ext = Extension(
 
 setup(
     name="aakaar",
-    version="0.1.5",
+    version="0.1.6",
     author="Aarav Aggarwal",
     description="A custom standalone ML library featuring CUDA-accelerated operations (CPU fallback supported).",
     packages=["aakaar"],
