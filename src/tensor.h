@@ -80,7 +80,6 @@ public:
         return strides == contiguous_strides(shape);
     }
 
-    // === NEW CONTIGUOUS METHOD ADDED HERE ===
     std::shared_ptr<Tensor> contiguous() {
         if (is_contiguous()) {
             return shared_from_this();  // already contiguous, return self reference
@@ -101,6 +100,41 @@ public:
                 idx[d] = 0;
             }
         }
+        return result;
+    }
+
+    // === NEW TO_DEVICE METHOD ADDED HERE ===
+    std::shared_ptr<Tensor> to_device(std::string target_device) {
+        if (target_device == device) {
+            return shared_from_this();  // no-op, already on the target device
+        }
+
+#ifdef AAKAAR_NO_CUDA
+        if (target_device == "cuda") {
+            throw std::runtime_error("This build of aakaar has no CUDA support.");
+        }
+#endif
+
+        // Materialize source into a flat host buffer first (handles views/strides correctly)
+        std::vector<float> host_buf(size);
+        std::vector<int> idx(shape.size(), 0);
+        for (int flat = 0; flat < size; ++flat) {
+            host_buf[flat] = get_scalar(idx);
+            for (int d = (int)shape.size() - 1; d >= 0; --d) {
+                if (++idx[d] < shape[d]) break;
+                idx[d] = 0;
+            }
+        }
+
+        auto result = std::make_shared<Tensor>(shape, target_device);
+
+#ifndef AAKAAR_NO_CUDA
+        if (target_device == "cuda") {
+            cudaMemcpy(result->data_ptr, host_buf.data(), size * sizeof(float), cudaMemcpyHostToDevice);
+            return result;
+        }
+#endif
+        std::memcpy(result->data_ptr, host_buf.data(), size * sizeof(float));
         return result;
     }
 

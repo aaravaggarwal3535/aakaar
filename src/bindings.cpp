@@ -88,6 +88,21 @@ static std::shared_ptr<Tensor> dispatch_div_scalar(std::shared_ptr<Tensor> a, fl
     return run_cpu_div_scalar(a, s);
 }
 
+int cuda_device_count() {
+#ifdef AAKAAR_NO_CUDA
+    return 0;
+#else
+    int count = 0;
+    cudaError_t err = cudaGetDeviceCount(&count);
+    if (err != cudaSuccess) return 0;  // no driver, no GPU, etc. — not an error condition, just "unavailable"
+    return count;
+#endif
+}
+
+bool cuda_is_available() {
+    return cuda_device_count() > 0;
+}
+
 // ============================================================================
 // === PYBIND11 MODULE DEFINITIONS ===
 // ============================================================================
@@ -104,6 +119,8 @@ PYBIND11_MODULE(_C, m) {
         .def("contiguous", &Tensor::contiguous)
         .def("__repr__", &Tensor::repr)
         .def("__str__", &Tensor::repr)
+        .def("to_device", &Tensor::to_device)
+        .def("to", &Tensor::to_device)
         .def("__len__", [](Tensor &t) { return t.shape.empty() ? 0 : t.shape[0]; })
         .def("__getitem__", [](std::shared_ptr<Tensor> self, py::object key) -> py::object {
             std::vector<py::object> items;
@@ -187,6 +204,8 @@ PYBIND11_MODULE(_C, m) {
     m.def("cpu_sub", &run_cpu_sub, "CPU elementwise subtract");
     m.def("cpu_mul", &run_cpu_mul, "CPU elementwise multiply");
     m.def("cpu_div", &run_cpu_div, "CPU elementwise divide");
+    m.def("is_available", &cuda_is_available, "Check if a CUDA-capable GPU is actually present and usable");
+    m.def("device_count", &cuda_device_count, "Number of CUDA-capable GPUs detected");
 
 #ifndef AAKAAR_NO_CUDA
     m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");

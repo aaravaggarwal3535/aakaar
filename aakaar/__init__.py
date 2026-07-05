@@ -1,6 +1,8 @@
 import os
 import sys
 
+__version__ = "0.1.7"
+
 def _add_windows_cuda_dll_dirs():
     if sys.platform != "win32":
         return
@@ -77,3 +79,17 @@ def sub(a, b):
         return _C.cuda_sub(a, b)
     else:
         return _C.cpu_sub(a, b)
+
+def is_available():
+    """Returns True if a CUDA-capable GPU is actually present and usable right now."""
+    return _C.is_available()
+
+def device_count():
+    """Number of CUDA-capable GPUs detected on this machine."""
+    return _C.device_count()
+
+class _CudaNamespace:
+    is_available = staticmethod(is_available)
+    device_count = staticmethod(device_count)
+
+cuda = _CudaNamespace()
