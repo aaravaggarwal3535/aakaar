@@ -57,3 +57,23 @@ def matmul(a, b):
         return _C.cuda_matmul(a, b)
     else:
         return _C.cpu_matmul(a, b)
+
+def add(a, b):
+    if a.device != b.device:
+        raise ValueError(f"Tensors on different devices: {a.device} vs {b.device}")
+    if a.device == "cuda":
+        if not _C.HAS_CUDA:
+            raise RuntimeError("This build of aakaar has no CUDA support.")
+        return _C.cuda_add(a, b)
+    else:
+        return _C.cpu_add(a, b)
+
+def sub(a, b):
+    if a.device != b.device:
+        raise ValueError(f"Tensors on different devices: {a.device} vs {b.device}")
+    if a.device == "cuda":
+        if not _C.HAS_CUDA:
+            raise RuntimeError("This build of aakaar has no CUDA support.")
+        return _C.cuda_sub(a, b)
+    else:
+        return _C.cpu_sub(a, b)

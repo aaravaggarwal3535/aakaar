@@ -36,3 +36,63 @@ std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_pt
     }
     return result;
 }
+
+std::shared_ptr<Tensor> run_cpu_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (a->shape != b->shape) {
+        throw std::invalid_argument("Shape mismatch in elementwise op");
+    }
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) {
+        result->data_ptr[i] = a->get_scalar_flat(i) + b->get_scalar_flat(i);
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (a->shape != b->shape) {
+        throw std::invalid_argument("Shape mismatch in elementwise op");
+    }
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) {
+        result->data_ptr[i] = a->get_scalar_flat(i) - b->get_scalar_flat(i);
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (a->shape != b->shape) throw std::invalid_argument("Shape mismatch in elementwise op");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) * b->get_scalar_flat(i);
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (a->shape != b->shape) throw std::invalid_argument("Shape mismatch in elementwise op");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) / b->get_scalar_flat(i);
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_add_scalar(std::shared_ptr<Tensor> a, float s) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) + s;
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_sub_scalar(std::shared_ptr<Tensor> a, float s) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) - s;
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_mul_scalar(std::shared_ptr<Tensor> a, float s) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) * s;
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_div_scalar(std::shared_ptr<Tensor> a, float s) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) / s;
+    return result;
+}

@@ -15,7 +15,7 @@
 
 namespace py = pybind11;
 
-class Tensor {
+class Tensor : public std::enable_shared_from_this<Tensor> {
 public:
     float* data_ptr;               // points at the first element THIS tensor/view sees
     int size;                      // element count of this view
@@ -46,8 +46,7 @@ public:
         strides = contiguous_strides(shape);
         if (device == "cuda") {
 #ifdef AAKAAR_NO_CUDA
-            throw std::runtime_error("This build of aakaar was compiled without CUDA support. "
-                                      "Use device='cpu' instead.");
+            throw std::runtime_error("This build of aakaar was compiled without CUDA support. Use device='cpu' instead.");
 #else
             owned_ptr = CachingAllocator::get_instance().allocate(size);
 #endif
@@ -81,6 +80,30 @@ public:
         return strides == contiguous_strides(shape);
     }
 
+    // === NEW CONTIGUOUS METHOD ADDED HERE ===
+    std::shared_ptr<Tensor> contiguous() {
+        if (is_contiguous()) {
+            return shared_from_this();  // already contiguous, return self reference
+        }
+        auto result = std::make_shared<Tensor>(shape, device);
+        std::vector<int> idx(shape.size(), 0);
+        for (int flat = 0; flat < size; ++flat) {
+            float val = get_scalar(idx);
+            if (device == "cuda") {
+#ifndef AAKAAR_NO_CUDA
+                cudaMemcpy(result->data_ptr + flat, &val, sizeof(float), cudaMemcpyHostToDevice);
+#endif
+            } else {
+                result->data_ptr[flat] = val;
+            }
+            for (int d = (int)shape.size() - 1; d >= 0; --d) {
+                if (++idx[d] < shape[d]) break;
+                idx[d] = 0;
+            }
+        }
+        return result;
+    }
+
     float get_scalar(const std::vector<int>& idx) {
         if (idx.size() != shape.size())
             throw std::out_of_range("Index dimensionality does not match tensor shape");
@@ -98,6 +121,17 @@ public:
         }
 #endif
         return data_ptr[off];
+    }
+
+    // Access element at flat logical index i, respecting strides (handles views correctly)
+    float get_scalar_flat(int flat_idx) {
+        std::vector<int> idx(shape.size());
+        int remaining = flat_idx;
+        for (int d = (int)shape.size() - 1; d >= 0; --d) {
+            idx[d] = remaining % shape[d];
+            remaining /= shape[d];
+        }
+        return get_scalar(idx);
     }
 
     // Correctly handles non-contiguous strided views on both CPU and CUDA

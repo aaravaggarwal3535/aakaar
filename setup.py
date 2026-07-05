@@ -62,7 +62,7 @@ class CUDABuildExtension(build_ext):
 
 aakaar_ext = Extension(
     "aakaar._C",
-    sources=["src/bindings.cpp", "src/cpu_kernel.cpp", "src/random_kernel.cu", 'src/matmul_kernel.cu'],
+    sources=["src/bindings.cpp", "src/cpu_kernel.cpp", "src/random_kernel.cu", 'src/matmul_kernel.cu', 'src/elementwise_kernel.cu'],
     include_dirs=[pybind11.get_include()],
     libraries=[],  # populated conditionally above
     language="c++",
