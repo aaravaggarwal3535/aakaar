@@ -2,6 +2,7 @@
 #include <memory>
 #include <stdexcept>
 #include "tensor.h"
+#include <omp.h>
 
 void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed) {
     std::mt19937 gen(seed);
@@ -12,26 +13,56 @@ void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed) {
 }
 
 std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    if (a->shape.size() != 2 || b->shape.size() != 2) {
-        throw std::invalid_argument("matmul currently supports 2D tensors only");
-    }
-    int M = a->shape[0];
-    int K = a->shape[1];
-    int K2 = b->shape[0];
-    int N = b->shape[1];
-    if (K != K2) {
-        throw std::invalid_argument("Shape mismatch: inner dimensions must match");
-    }
+    if (!a->is_contiguous() || !b->is_contiguous())
+        throw std::invalid_argument("matmul requires contiguous tensors. Call .contiguous() first.");
 
-    auto result = std::make_shared<Tensor>(std::vector<int>{M, N}, std::string("cpu"));
+    auto last2 = [](const std::vector<int>& s) { return std::make_pair(s[s.size()-2], s[s.size()-1]); };
+    int ndimA = (int)a->shape.size(), ndimB = (int)b->shape.size();
+    if (ndimA < 2 || ndimB < 2)
+        throw std::invalid_argument("matmul requires tensors with at least 2 dimensions");
+    if (ndimA > 3 || ndimB > 3)
+        throw std::invalid_argument("matmul currently supports at most one batch dimension (2D or 3D tensors)");
 
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < N; ++j) {
-            float sum = 0.0f;
-            for (int k = 0; k < K; ++k) {
-                sum += a->data_ptr[i * K + k] * b->data_ptr[k * N + j];
+    auto [M, K] = last2(a->shape);
+    auto [K2, N] = last2(b->shape);
+    if (K != K2) throw std::invalid_argument("Shape mismatch: inner dimensions must match");
+
+    int batchA = ndimA == 3 ? a->shape[0] : 1;
+    int batchB = ndimB == 3 ? b->shape[0] : 1;
+    int batch;
+    if (batchA == batchB) batch = batchA;
+    else if (batchA == 1) batch = batchB;
+    else if (batchB == 1) batch = batchA;
+    else throw std::invalid_argument("Batch dimensions must match or one must be 1");
+
+    std::vector<int> out_shape = batch > 1 ? std::vector<int>{batch, M, N} : std::vector<int>{M, N};
+    auto result = std::make_shared<Tensor>(out_shape, std::string("cpu"));
+
+    // 1. Multithreading: Parallelize across the batch and M dimensions
+    #pragma omp parallel for collapse(2)
+    for (int bi = 0; bi < batch; ++bi) {
+        for (int i = 0; i < M; ++i) {
+            // Recalculate pointers inside the loop for thread safety
+            const float* a_ptr = a->data_ptr + (batchA > 1 ? bi * M * K : 0);
+            const float* b_ptr = b->data_ptr + (batchB > 1 ? bi * K * N : 0);
+            float* c_ptr = result->data_ptr + bi * M * N;
+
+            // Initialize the current row of C to 0
+            for (int j = 0; j < N; ++j) {
+                c_ptr[i * N + j] = 0.0f;
             }
-            result->data_ptr[i * N + j] = sum;
+
+            // 2. Loop Reordering: Swap the j and k loops (i-k-j instead of i-j-k)
+            for (int k = 0; k < K; ++k) {
+                // Cache the scalar value of A to avoid re-reading it
+                float a_ik = a_ptr[i * K + k]; 
+                
+                // 3. Auto-Vectorization: Inner loop now accesses memory sequentially
+                // A modern compiler will vectorize this loop using AVX/SSE
+                for (int j = 0; j < N; ++j) {
+                    c_ptr[i * N + j] += a_ik * b_ptr[k * N + j];
+                }
+            }
         }
     }
     return result;

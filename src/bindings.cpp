@@ -195,7 +195,13 @@ PYBIND11_MODULE(_C, m) {
         .def("__rmul__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_mul_scalar(a, s); })
 
         .def("__truediv__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_div(a, b); })
-        .def("__truediv__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_div_scalar(a, s); });
+        .def("__truediv__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_div_scalar(a, s); })
+        .def("__matmul__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+#ifndef AAKAAR_NO_CUDA
+            if (a->device == "cuda") return run_cublas_matmul(a, b);
+#endif
+            return run_cpu_matmul(a, b);
+        });
 
     // Standalone module functions
     m.def("fill_cpu_random", &fill_cpu_random, "Fill CPU Tensor with random numbers");

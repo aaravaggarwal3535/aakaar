@@ -24,6 +24,7 @@ class CUDABuildExtension(build_ext):
             cuda_lib = os.path.join(cuda_home, "lib", "x64") if is_windows else os.path.join(cuda_home, "lib64")
 
             nvcc_flags = ["-O3",
+                          "-std=c++17",
                           "-gencode=arch=compute_75,code=sm_75",
                           "-gencode=arch=compute_86,code=sm_86",
                           "-gencode=arch=compute_89,code=sm_89"]
@@ -59,13 +60,14 @@ class CUDABuildExtension(build_ext):
 
         super().build_extensions()
 
-
+host_compiler_flags = ["/std:c++17"] if sys.platform == "win32" else ["-std=c++17"]
 aakaar_ext = Extension(
     "aakaar._C",
     sources=["src/bindings.cpp", "src/cpu_kernel.cpp", "src/random_kernel.cu", 'src/matmul_kernel.cu', 'src/elementwise_kernel.cu'],
     include_dirs=[pybind11.get_include()],
     libraries=[],  # populated conditionally above
     language="c++",
+    extra_compile_args=host_compiler_flags
 )
 
 setup(
