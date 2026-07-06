@@ -1,7 +1,7 @@
 import os
 import sys
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 
 def _add_windows_cuda_dll_dirs():
     if sys.platform != "win32":
@@ -36,7 +36,7 @@ def _normalize_shape(size):
         return [size]
     return list(size)
 
-def rand(size, device: str = "cpu", seed: int = 42):
+def rand(size, device: str = "cpu", seed: int = 42, requires_grad: bool = False):
     if device == "cuda" and not _C.HAS_CUDA:
         raise RuntimeError(
             "This installation of aakaar was built without CUDA support. "
@@ -48,6 +48,7 @@ def rand(size, device: str = "cpu", seed: int = 42):
         _C.generate_random(t, seed)
     else:
         _C.fill_cpu_random(t, seed)
+    t.requires_grad = requires_grad
     return t
 
 def matmul(a, b):

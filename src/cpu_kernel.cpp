@@ -16,54 +16,54 @@ std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_pt
     if (!a->is_contiguous() || !b->is_contiguous())
         throw std::invalid_argument("matmul requires contiguous tensors. Call .contiguous() first.");
 
-    auto last2 = [](const std::vector<int>& s) { return std::make_pair(s[s.size()-2], s[s.size()-1]); };
-    int ndimA = (int)a->shape.size(), ndimB = (int)b->shape.size();
-    if (ndimA < 2 || ndimB < 2)
-        throw std::invalid_argument("matmul requires tensors with at least 2 dimensions");
-    if (ndimA > 3 || ndimB > 3)
-        throw std::invalid_argument("matmul currently supports at most one batch dimension (2D or 3D tensors)");
-
-    auto [M, K] = last2(a->shape);
-    auto [K2, N] = last2(b->shape);
+    auto batch_dims = [](const std::vector<int>& s) { return std::vector<int>(s.begin(), s.end()-2); };
+    int M = a->shape[a->shape.size()-2], K = a->shape.back();
+    int K2 = b->shape[b->shape.size()-2], N = b->shape.back();
     if (K != K2) throw std::invalid_argument("Shape mismatch: inner dimensions must match");
 
-    int batchA = ndimA == 3 ? a->shape[0] : 1;
-    int batchB = ndimB == 3 ? b->shape[0] : 1;
-    int batch;
-    if (batchA == batchB) batch = batchA;
-    else if (batchA == 1) batch = batchB;
-    else if (batchB == 1) batch = batchA;
-    else throw std::invalid_argument("Batch dimensions must match or one must be 1");
+    auto ba = batch_dims(a->shape), bb = batch_dims(b->shape);
+    int ndb = std::max(ba.size(), bb.size());
+    std::vector<int> out_batch(ndb);
+    for (int i = 0; i < ndb; ++i) {
+        int da = i < (int)ba.size() ? ba[ba.size()-1-i] : 1;
+        int db = i < (int)bb.size() ? bb[bb.size()-1-i] : 1;
+        if (da != db && da != 1 && db != 1)
+            throw std::invalid_argument("Batch dimensions are not broadcastable for matmul");
+        out_batch[ndb-1-i] = std::max(da, db);
+    }
+    int total_batch = 1;
+    for (int d : out_batch) total_batch *= d;
 
-    std::vector<int> out_shape = batch > 1 ? std::vector<int>{batch, M, N} : std::vector<int>{M, N};
+    std::vector<int> out_shape = out_batch;
+    out_shape.push_back(M); out_shape.push_back(N);
     auto result = std::make_shared<Tensor>(out_shape, std::string("cpu"));
 
-    // 1. Multithreading: Parallelize across the batch and M dimensions
-    #pragma omp parallel for collapse(2)
-    for (int bi = 0; bi < batch; ++bi) {
-        for (int i = 0; i < M; ++i) {
-            // Recalculate pointers inside the loop for thread safety
-            const float* a_ptr = a->data_ptr + (batchA > 1 ? bi * M * K : 0);
-            const float* b_ptr = b->data_ptr + (batchB > 1 ? bi * K * N : 0);
-            float* c_ptr = result->data_ptr + bi * M * N;
-
-            // Initialize the current row of C to 0
-            for (int j = 0; j < N; ++j) {
-                c_ptr[i * N + j] = 0.0f;
-            }
-
-            // 2. Loop Reordering: Swap the j and k loops (i-k-j instead of i-j-k)
-            for (int k = 0; k < K; ++k) {
-                // Cache the scalar value of A to avoid re-reading it
-                float a_ik = a_ptr[i * K + k]; 
-                
-                // 3. Auto-Vectorization: Inner loop now accesses memory sequentially
-                // A modern compiler will vectorize this loop using AVX/SSE
-                for (int j = 0; j < N; ++j) {
-                    c_ptr[i * N + j] += a_ik * b_ptr[k * N + j];
-                }
-            }
+    auto compute_offset = [&](int flat_idx, const std::vector<int>& in_shape, int mat_size) {
+        auto in_batch = batch_dims(in_shape);
+        int nd_in = (int)in_batch.size();
+        std::vector<int> idx(ndb);
+        int rem = flat_idx;
+        for (int i = ndb - 1; i >= 0; --i) { idx[i] = rem % out_batch[i]; rem /= out_batch[i]; }
+        long long off = 0, stride = mat_size;
+        for (int i = ndb - 1; i >= 0; --i) {
+            int in_i = i - (ndb - nd_in);
+            int in_dim = in_i >= 0 ? in_batch[in_i] : 1;
+            int use_idx = (in_dim == 1) ? 0 : idx[i];
+            if (in_i >= 0) { off += (long long)use_idx * stride; stride *= in_dim; }
         }
+        return (int)off;
+    };
+
+    for (int bi = 0; bi < total_batch; ++bi) {
+        const float* ap = a->data_ptr + compute_offset(bi, a->shape, M*K);
+        const float* bp = b->data_ptr + compute_offset(bi, b->shape, K*N);
+        float* cp = result->data_ptr + bi * M * N;
+        for (int i = 0; i < M; ++i)
+            for (int j = 0; j < N; ++j) {
+                float sum = 0.0f;
+                for (int k = 0; k < K; ++k) sum += ap[i*K+k] * bp[k*N+j];
+                cp[i*N+j] = sum;
+            }
     }
     return result;
 }
@@ -125,5 +125,74 @@ std::shared_ptr<Tensor> run_cpu_mul_scalar(std::shared_ptr<Tensor> a, float s) {
 std::shared_ptr<Tensor> run_cpu_div_scalar(std::shared_ptr<Tensor> a, float s) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) / s;
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
+    if (!a->is_contiguous())
+        throw std::invalid_argument("sum() requires a contiguous tensor. Call .contiguous() first.");
+
+    int ndim = (int)a->shape.size();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) throw std::out_of_range("sum() dim out of range");
+
+    int outer_size = 1, inner_size = 1;
+    for (int i = 0; i < dim; ++i) outer_size *= a->shape[i];
+    for (int i = dim + 1; i < ndim; ++i) inner_size *= a->shape[i];
+    int reduce_size = a->shape[dim];
+
+    std::vector<int> out_shape;
+    for (int i = 0; i < ndim; ++i) {
+        if (i == dim) { if (keepdim) out_shape.push_back(1); }
+        else out_shape.push_back(a->shape[i]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    auto result = std::make_shared<Tensor>(out_shape, std::string("cpu"));
+
+    for (int o = 0; o < outer_size; ++o) {
+        for (int i = 0; i < inner_size; ++i) {
+            float acc = 0.0f;
+            for (int r = 0; r < reduce_size; ++r) {
+                acc += a->data_ptr[(o * reduce_size + r) * inner_size + i];
+            }
+            result->data_ptr[o * inner_size + i] = acc;
+        }
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_sum_all(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous())
+        throw std::invalid_argument("sum() requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(std::vector<int>{1}, std::string("cpu"));
+    float acc = 0.0f;
+    for (int i = 0; i < a->size; ++i) acc += a->data_ptr[i];
+    result->data_ptr[0] = acc;
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size) {
+    if (!a->is_contiguous())
+        throw std::invalid_argument("broadcast requires a contiguous tensor.");
+    int ndim = (int)a->shape.size();
+    if (dim < 0) dim += ndim;
+
+    std::vector<int> out_shape = a->shape;
+    out_shape[dim] = target_size;
+    auto result = std::make_shared<Tensor>(out_shape, std::string("cpu"));
+
+    int outer_size = 1, inner_size = 1;
+    for (int i = 0; i < dim; ++i) outer_size *= a->shape[i];
+    for (int i = dim + 1; i < ndim; ++i) inner_size *= a->shape[i];
+
+    for (int o = 0; o < outer_size; ++o) {
+        for (int t = 0; t < target_size; ++t) {
+            for (int i = 0; i < inner_size; ++i) {
+                result->data_ptr[(o * target_size + t) * inner_size + i] =
+                    a->data_ptr[o * inner_size + i];
+            }
+        }
+    }
     return result;
 }
