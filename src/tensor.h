@@ -21,6 +21,10 @@ struct Node {
     std::function<std::vector<std::shared_ptr<Tensor>>(std::shared_ptr<Tensor>)> backward_fn;
     std::vector<std::shared_ptr<Tensor>> inputs;
     std::string op_name;
+    bool freed = false;  // set true only when a backward() call with retain_graph=False
+                          // has consumed this node; a later backward() attempt through
+                          // this node then raises a clear error instead of silently
+                          // treating it as a leaf.
 };
 
 class Tensor : public std::enable_shared_from_this<Tensor> {
@@ -109,6 +113,12 @@ public:
     }
 
 // Add inside the class, near contiguous()
+std::shared_ptr<Tensor> detach() {
+    auto result = std::make_shared<Tensor>(shared_from_this(), 0, shape, strides);
+    result->requires_grad = false;
+    // grad_fn is already null on a freshly constructed Tensor
+    return result;
+}
 // Swap two arbitrary axes (like torch's .transpose(dim0, dim1))
     std::shared_ptr<Tensor> transpose(int dim0, int dim1) {
         int ndim = (int)shape.size();
@@ -266,7 +276,45 @@ std::shared_ptr<Tensor> reshape(std::vector<int> new_shape) {
         }
         return get_scalar(idx);
     }
+// ... existing get_scalar and get_scalar_flat ...
 
+    // Write a single scalar value at a multi-dimensional index, respecting strides.
+    void set_scalar(const std::vector<int>& idx, float value) {
+        int off = 0;
+        for (size_t i = 0; i < idx.size(); ++i) {
+            off += idx[i] * strides[i];
+        }
+#ifndef AAKAAR_NO_CUDA
+        if (device == "cuda") {
+            cudaMemcpy(data_ptr + off, &value, sizeof(float), cudaMemcpyHostToDevice);
+            return;
+        }
+#endif
+        data_ptr[off] = value;
+    }
+
+    // Zero out this tensor's entire buffer.
+    void fill_zero() {
+#ifndef AAKAAR_NO_CUDA
+        if (device == "cuda") {
+            cudaMemset(data_ptr, 0, size * sizeof(float));
+            return;
+        }
+#endif
+        std::memset(data_ptr, 0, size * sizeof(float));
+    }
+
+    // Unwrap a single-element tensor to a plain float.
+    float item() {
+        if (size != 1)
+            throw std::runtime_error(
+                "item() only works on tensors with exactly one element, got size=" +
+                std::to_string(size) + ". Use to_numpy() for multi-element tensors.");
+        std::vector<int> idx(shape.size(), 0);
+        return get_scalar(idx);
+    }
+
+    // ... existing to_numpy() method ...
     // Correctly handles non-contiguous strided views on both CPU and CUDA
     py::array_t<float> to_numpy() {
         py::array_t<float> result(shape);

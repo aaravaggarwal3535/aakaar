@@ -8,6 +8,8 @@
 
 namespace py = pybind11;
 
+static bool g_grad_enabled = true;
+
 // ---- Forward declarations: raw ops ----
 void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed);
 std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
@@ -22,6 +24,7 @@ std::shared_ptr<Tensor> run_cpu_div_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cpu_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
 std::shared_ptr<Tensor> run_cpu_sum_all(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size);
+
 
 #ifndef AAKAAR_NO_CUDA
 #include "allocator.h"
@@ -52,100 +55,10 @@ static std::shared_ptr<Tensor> dispatch_mul_scalar(std::shared_ptr<Tensor> a, fl
 static std::shared_ptr<Tensor> dispatch_div_scalar(std::shared_ptr<Tensor> a, float s);
 static std::shared_ptr<Tensor> dispatch_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 static std::shared_ptr<Tensor> dispatch_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
+static std::shared_ptr<Tensor> dispatch_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size);
+static std::shared_ptr<Tensor> dispatch_contiguous(std::shared_ptr<Tensor> a);
 
 // ---- Dispatch implementations ----
-
-static std::shared_ptr<Tensor> dispatch_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    std::shared_ptr<Tensor> result;
-#ifndef AAKAAR_NO_CUDA
-    if (a->device == "cuda") result = run_cuda_add(a, b);
-    else
-#endif
-    result = run_cpu_add(a, b);
-
-    if (a->requires_grad || b->requires_grad) {
-        result->requires_grad = true;
-        auto node = std::make_shared<Node>();
-        node->inputs = {a, b};
-        node->op_name = "add";
-        node->backward_fn = [](std::shared_ptr<Tensor> grad_out) {
-            return std::vector<std::shared_ptr<Tensor>>{grad_out, grad_out};
-        };
-        result->grad_fn = node;
-    }
-    return result;
-}
-
-static std::shared_ptr<Tensor> dispatch_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    std::shared_ptr<Tensor> result;
-#ifndef AAKAAR_NO_CUDA
-    if (a->device == "cuda") result = run_cuda_sub(a, b);
-    else
-#endif
-    result = run_cpu_sub(a, b);
-
-    if (a->requires_grad || b->requires_grad) {
-        result->requires_grad = true;
-        auto node = std::make_shared<Node>();
-        node->inputs = {a, b};
-        node->op_name = "sub";
-        node->backward_fn = [](std::shared_ptr<Tensor> grad_out) {
-            auto neg = dispatch_mul_scalar(grad_out, -1.0f);
-            return std::vector<std::shared_ptr<Tensor>>{grad_out, neg};
-        };
-        result->grad_fn = node;
-    }
-    return result;
-}
-
-static std::shared_ptr<Tensor> dispatch_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    std::shared_ptr<Tensor> result;
-#ifndef AAKAAR_NO_CUDA
-    if (a->device == "cuda") result = run_cuda_mul(a, b);
-    else
-#endif
-    result = run_cpu_mul(a, b);
-
-    if (a->requires_grad || b->requires_grad) {
-        result->requires_grad = true;
-        auto node = std::make_shared<Node>();
-        node->inputs = {a, b};
-        node->op_name = "mul";
-        node->backward_fn = [a, b](std::shared_ptr<Tensor> grad_out) {
-            auto da = dispatch_mul(grad_out, b);
-            auto db = dispatch_mul(grad_out, a);
-            return std::vector<std::shared_ptr<Tensor>>{da, db};
-        };
-        result->grad_fn = node;
-    }
-    return result;
-}
-
-static std::shared_ptr<Tensor> dispatch_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    std::shared_ptr<Tensor> result;
-#ifndef AAKAAR_NO_CUDA
-    if (a->device == "cuda") result = run_cuda_div(a, b);
-    else
-#endif
-    result = run_cpu_div(a, b);
-
-    if (a->requires_grad || b->requires_grad) {
-        result->requires_grad = true;
-        auto node = std::make_shared<Node>();
-        node->inputs = {a, b};
-        node->op_name = "div";
-        node->backward_fn = [a, b](std::shared_ptr<Tensor> grad_out) {
-            auto da = dispatch_div(grad_out, b);
-            auto b_sq = dispatch_mul(b, b);
-            auto a_over_bsq = dispatch_div(a, b_sq);
-            auto neg = dispatch_mul_scalar(a_over_bsq, -1.0f);
-            auto db = dispatch_mul(grad_out, neg);
-            return std::vector<std::shared_ptr<Tensor>>{da, db};
-        };
-        result->grad_fn = node;
-    }
-    return result;
-}
 
 static std::shared_ptr<Tensor> dispatch_add_scalar(std::shared_ptr<Tensor> a, float s) {
     std::shared_ptr<Tensor> result;
@@ -155,7 +68,7 @@ static std::shared_ptr<Tensor> dispatch_add_scalar(std::shared_ptr<Tensor> a, fl
 #endif
     result = run_cpu_add_scalar(a, s);
 
-    if (a->requires_grad) {
+    if (g_grad_enabled && a->requires_grad) {
         result->requires_grad = true;
         auto node = std::make_shared<Node>();
         node->inputs = {a};
@@ -176,7 +89,7 @@ static std::shared_ptr<Tensor> dispatch_sub_scalar(std::shared_ptr<Tensor> a, fl
 #endif
     result = run_cpu_sub_scalar(a, s);
 
-    if (a->requires_grad) {
+    if (g_grad_enabled && a->requires_grad) {
         result->requires_grad = true;
         auto node = std::make_shared<Node>();
         node->inputs = {a};
@@ -197,7 +110,7 @@ static std::shared_ptr<Tensor> dispatch_mul_scalar(std::shared_ptr<Tensor> a, fl
 #endif
     result = run_cpu_mul_scalar(a, s);
 
-    if (a->requires_grad) {
+    if (g_grad_enabled && a->requires_grad) {
         result->requires_grad = true;
         auto node = std::make_shared<Node>();
         node->inputs = {a};
@@ -219,7 +132,7 @@ static std::shared_ptr<Tensor> dispatch_div_scalar(std::shared_ptr<Tensor> a, fl
 #endif
     result = run_cpu_div_scalar(a, s);
 
-    if (a->requires_grad) {
+    if (g_grad_enabled && a->requires_grad) {
         result->requires_grad = true;
         auto node = std::make_shared<Node>();
         node->inputs = {a};
@@ -233,61 +146,9 @@ static std::shared_ptr<Tensor> dispatch_div_scalar(std::shared_ptr<Tensor> a, fl
     return result;
 }
 
-static std::shared_ptr<Tensor> dispatch_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    std::shared_ptr<Tensor> result;
-#ifndef AAKAAR_NO_CUDA
-    if (a->device == "cuda") result = run_cublas_matmul(a, b);
-    else
-#endif
-    result = run_cpu_matmul(a, b);
-
-    if (a->requires_grad || b->requires_grad) {
-        result->requires_grad = true;
-        auto node = std::make_shared<Node>();
-        node->inputs = {a, b};
-        node->op_name = "matmul";
-        node->backward_fn = [a, b](std::shared_ptr<Tensor> grad_out) {
-            int nd_a = (int)a->shape.size();
-            int nd_b = (int)b->shape.size();
-
-            auto bT = b->transpose(nd_b-2, nd_b-1)->contiguous();
-            auto aT = a->transpose(nd_a-2, nd_a-1)->contiguous();
-
-            auto da_full = dispatch_matmul(grad_out, bT);  // shape matches grad_out's batch dims
-            auto db_full = dispatch_matmul(aT, grad_out);
-
-            // If a broadcast along any batch axis, da_full's batch dims are larger than a's;
-            // sum those axes back down to match a's original shape (the broadcast gradient rule).
-            auto reduce_broadcast = [](std::shared_ptr<Tensor> grad, const std::vector<int>& target_shape) {
-                int nd_g = (int)grad->shape.size();
-                int nd_t = (int)target_shape.size();
-                int offset = nd_g - nd_t;
-                auto g = grad;
-                // sum any leading extra batch dims entirely (target didn't have them at all)
-                for (int i = 0; i < offset; ++i) {
-                    g = dispatch_sum_axis(g, 0, false);
-                }
-                // for remaining aligned dims, sum any axis where target was 1 but grad isn't
-                for (int i = 0; i < nd_t - 2; ++i) {  // skip the trailing M,K/K,N dims
-                    if (target_shape[i] == 1 && g->shape[i] != 1) {
-                        g = dispatch_sum_axis(g, i, true);
-                    }
-                }
-                return g;
-            };
-
-            auto da = reduce_broadcast(da_full, a->shape);
-            auto db = reduce_broadcast(db_full, b->shape);
-            return std::vector<std::shared_ptr<Tensor>>{da, db};
-        };
-        result->grad_fn = node;
-    }
-    return result;
-}
-
 // ---- backward() driver: reverse-mode topological traversal ----
 
-static void tensor_backward(std::shared_ptr<Tensor> root, std::shared_ptr<Tensor> grad_output) {
+static void tensor_backward(std::shared_ptr<Tensor> root, std::shared_ptr<Tensor> grad_output, bool retain_graph) {
     if (!grad_output) {
         if (root->size != 1)
             throw std::runtime_error("backward() requires an explicit gradient for non-scalar tensors");
@@ -330,6 +191,14 @@ static void tensor_backward(std::shared_ptr<Tensor> root, std::shared_ptr<Tensor
         }
 
         if (t->grad_fn) {
+            if (t->grad_fn->freed) {
+                throw std::runtime_error(
+                    "Trying to backward through the graph a second time (or a part of it), but the "
+                    "intermediate results needed have already been freed. Pass retain_graph=True to "
+                    "backward() the first time if you need to backward through this part of the graph "
+                    "more than once."
+                );
+            }
             auto input_grads = t->grad_fn->backward_fn(g);
             for (size_t i = 0; i < t->grad_fn->inputs.size(); ++i) {
                 auto& inp = t->grad_fn->inputs[i];
@@ -340,6 +209,12 @@ static void tensor_backward(std::shared_ptr<Tensor> root, std::shared_ptr<Tensor
             }
         }
     }
+
+    if (!retain_graph) {
+        for (auto& t : topo) {
+            if (t->grad_fn) t->grad_fn->freed = true;
+        }
+    }
 }
 
 static std::shared_ptr<Tensor> dispatch_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size) {
@@ -348,8 +223,24 @@ static std::shared_ptr<Tensor> dispatch_broadcast_axis(std::shared_ptr<Tensor> a
 #endif
     return run_cpu_broadcast_axis(a, dim, target_size);
 }
-
+static std::shared_ptr<Tensor> dispatch_contiguous(std::shared_ptr<Tensor> a) {
+    auto result = a->contiguous();
+    if (g_grad_enabled && a->requires_grad && result.get() != a.get()) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a};
+        node->op_name = "contiguous";
+        node->backward_fn = [](std::shared_ptr<Tensor> grad_out) {
+            return std::vector<std::shared_ptr<Tensor>>{grad_out};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
 static std::shared_ptr<Tensor> dispatch_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
+    if (!a->is_contiguous()) {
+        a = a->contiguous();  // auto-materialize, matching torch's ergonomic sum() behavior
+    }
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
     if (a->device == "cuda") result = run_cuda_sum_axis(a, dim, keepdim);
@@ -357,18 +248,24 @@ static std::shared_ptr<Tensor> dispatch_sum_axis(std::shared_ptr<Tensor> a, int 
 #endif
     result = run_cpu_sum_axis(a, dim, keepdim);
 
-    if (a->requires_grad) {
+    if (g_grad_enabled && a->requires_grad) {
         result->requires_grad = true;
         auto node = std::make_shared<Node>();
         node->inputs = {a};
         node->op_name = "sum_axis";
-        int original_size = a->shape[dim < 0 ? dim + (int)a->shape.size() : dim];
         int norm_dim = dim < 0 ? dim + (int)a->shape.size() : dim;
+        int original_size = a->shape[norm_dim];
         node->backward_fn = [norm_dim, original_size, keepdim](std::shared_ptr<Tensor> grad_out) {
             auto g = grad_out;
-            // if keepdim was False, the reduced axis is missing entirely; broadcast_axis
-            // expects that axis to exist as size 1, so this assumes keepdim=True upstream
-            // usage, or the caller reshapes first — documented limitation for now.
+            if (!keepdim) {
+                // The forward pass dropped this axis entirely (keepdim=False), so
+                // grad_out is missing it too. Reinsert a size-1 axis at norm_dim
+                // before broadcasting, since broadcast_axis expects that axis to
+                // already exist (as size 1) in order to expand it back out.
+                auto reshaped = g->shape;
+                reshaped.insert(reshaped.begin() + norm_dim, 1);
+                g = g->reshape(reshaped);
+            }
             auto expanded = dispatch_broadcast_axis(g, norm_dim, original_size);
             return std::vector<std::shared_ptr<Tensor>>{expanded};
         };
@@ -378,6 +275,9 @@ static std::shared_ptr<Tensor> dispatch_sum_axis(std::shared_ptr<Tensor> a, int 
 }
 
 static std::shared_ptr<Tensor> dispatch_sum_all(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) {
+        a = dispatch_contiguous(a);  // auto-materialize, matching torch's ergonomic sum() behavior
+    }
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
     if (a->device == "cuda") result = run_cuda_sum_all(a);
@@ -385,7 +285,7 @@ static std::shared_ptr<Tensor> dispatch_sum_all(std::shared_ptr<Tensor> a) {
 #endif
     result = run_cpu_sum_all(a);
 
-    if (a->requires_grad) {
+    if (g_grad_enabled && a->requires_grad) {
         result->requires_grad = true;
         auto node = std::make_shared<Node>();
         node->inputs = {a};
@@ -408,6 +308,195 @@ static std::shared_ptr<Tensor> dispatch_sum_all(std::shared_ptr<Tensor> a) {
     return result;
 }
 
+
+// Sums `grad` down to `target_shape` following numpy/torch broadcasting-gradient
+// rules: any leading dims present in `grad` but absent from `target_shape` are
+// summed away entirely (they existed only because of broadcasting), and any
+// aligned dim where `target_shape` is 1 but `grad` is not gets summed with
+// keepdim=true (that axis was broadcast from size 1).
+//
+// `skip_trailing` lets matmul reuse this for its batch dims only, leaving the
+// trailing (M,K)/(K,N) dims untouched — those are never broadcast targets for
+// matmul, they're the actual contraction/output dims.
+static std::shared_ptr<Tensor> reduce_grad_to_shape(std::shared_ptr<Tensor> grad,
+                                                     const std::vector<int>& target_shape,
+                                                     int skip_trailing = 0) {
+    int nd_g = (int)grad->shape.size();
+    int nd_t = (int)target_shape.size();
+
+    if (nd_g < nd_t)
+        throw std::runtime_error(
+            "reduce_grad_to_shape: gradient has fewer dims (" + std::to_string(nd_g) +
+            ") than its target shape (" + std::to_string(nd_t) +
+            "). This indicates a bug upstream in the forward/backward broadcasting logic.");
+
+    auto g = grad;
+    int offset = nd_g - nd_t;
+    // Leading extra dims: target never had them, so they're pure broadcast axes.
+    // Always sum axis 0 repeatedly since each removal shifts everything down.
+    for (int i = 0; i < offset; ++i) {
+        g = dispatch_sum_axis(g, 0, false);
+    }
+
+    // Aligned dims: sum where target was 1 but the (now offset-adjusted) grad isn't.
+    int nd_g_now = (int)g->shape.size();
+    for (int i = 0; i < nd_t - skip_trailing; ++i) {
+        if (i >= nd_g_now) break;  // defensive; shouldn't happen given the checks above
+        if (target_shape[i] == 1 && g->shape[i] != 1) {
+            g = dispatch_sum_axis(g, i, true);
+        }
+    }
+
+    if (g->shape != target_shape && skip_trailing == 0) {
+        throw std::runtime_error(
+            "reduce_grad_to_shape: reduced gradient shape does not match target shape "
+            "after reduction. This means the forward op's broadcasting and this backward "
+            "reduction have gone out of sync — check the forward kernel's broadcast rules.");
+    }
+    return g;
+}
+
+static std::shared_ptr<Tensor> dispatch_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_add(a, b);
+    else
+#endif
+    result = run_cpu_add(a, b);
+
+    if (g_grad_enabled && (a->requires_grad || b->requires_grad)) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a, b};
+        node->op_name = "add";
+        auto a_shape = a->shape;
+        auto b_shape = b->shape;
+        node->backward_fn = [a_shape, b_shape](std::shared_ptr<Tensor> grad_out) {
+            auto da = reduce_grad_to_shape(grad_out, a_shape);
+            auto db = reduce_grad_to_shape(grad_out, b_shape);
+            return std::vector<std::shared_ptr<Tensor>>{da, db};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_sub(a, b);
+    else
+#endif
+    result = run_cpu_sub(a, b);
+
+    if (g_grad_enabled && (a->requires_grad || b->requires_grad)) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a, b};
+        node->op_name = "sub";
+        auto a_shape = a->shape;
+        auto b_shape = b->shape;
+        node->backward_fn = [a_shape, b_shape](std::shared_ptr<Tensor> grad_out) {
+            auto neg = dispatch_mul_scalar(grad_out, -1.0f);
+            auto da = reduce_grad_to_shape(grad_out, a_shape);
+            auto db = reduce_grad_to_shape(neg, b_shape);
+            return std::vector<std::shared_ptr<Tensor>>{da, db};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_mul(a, b);
+    else
+#endif
+    result = run_cpu_mul(a, b);
+
+    if (g_grad_enabled && (a->requires_grad || b->requires_grad)) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a, b};
+        node->op_name = "mul";
+        node->backward_fn = [a, b](std::shared_ptr<Tensor> grad_out) {
+            // grad_out * b (or a) is computed at the OUTPUT's (broadcasted) shape,
+            // then reduced back down to a's (or b's) original shape.
+            auto da_full = dispatch_mul(grad_out, b);
+            auto db_full = dispatch_mul(grad_out, a);
+            auto da = reduce_grad_to_shape(da_full, a->shape);
+            auto db = reduce_grad_to_shape(db_full, b->shape);
+            return std::vector<std::shared_ptr<Tensor>>{da, db};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_div(a, b);
+    else
+#endif
+    result = run_cpu_div(a, b);
+
+    if (g_grad_enabled && (a->requires_grad || b->requires_grad)) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a, b};
+        node->op_name = "div";
+        node->backward_fn = [a, b](std::shared_ptr<Tensor> grad_out) {
+            auto da_full = dispatch_div(grad_out, b);
+            auto b_sq = dispatch_mul(b, b);
+            auto a_over_bsq = dispatch_div(a, b_sq);
+            auto neg = dispatch_mul_scalar(a_over_bsq, -1.0f);
+            auto db_full = dispatch_mul(grad_out, neg);
+            auto da = reduce_grad_to_shape(da_full, a->shape);
+            auto db = reduce_grad_to_shape(db_full, b->shape);
+            return std::vector<std::shared_ptr<Tensor>>{da, db};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cublas_matmul(a, b);
+    else
+#endif
+    result = run_cpu_matmul(a, b);
+
+    if (g_grad_enabled && (a->requires_grad || b->requires_grad)) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a, b};
+        node->op_name = "matmul";
+        node->backward_fn = [a, b](std::shared_ptr<Tensor> grad_out) {
+            int nd_a = (int)a->shape.size();
+            int nd_b = (int)b->shape.size();
+
+            auto bT = b->transpose(nd_b-2, nd_b-1)->contiguous();
+            auto aT = a->transpose(nd_a-2, nd_a-1)->contiguous();
+
+            auto da_full = dispatch_matmul(grad_out, bT);
+            auto db_full = dispatch_matmul(aT, grad_out);
+
+            // skip_trailing=2: the last two dims are the actual M/K and K/N
+            // matmul dims, never broadcast targets — only batch dims (0..ndim-2)
+            // can differ due to broadcasting.
+            auto da = reduce_grad_to_shape(da_full, a->shape, 2);
+            auto db = reduce_grad_to_shape(db_full, b->shape, 2);
+            return std::vector<std::shared_ptr<Tensor>>{da, db};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
 // ---- Module definition ----
 
 PYBIND11_MODULE(_C, m) {
@@ -421,25 +510,28 @@ PYBIND11_MODULE(_C, m) {
         .def_readonly("grad", &Tensor::grad)
         .def("to_numpy", &Tensor::to_numpy)
         .def("is_contiguous", &Tensor::is_contiguous)
-        .def("contiguous", [](std::shared_ptr<Tensor> self) {
-            auto result = self->contiguous();
-            if (self->requires_grad && result.get() != self.get()) {
-                result->requires_grad = true;
-                auto node = std::make_shared<Node>();
-                node->inputs = {self};
-                node->op_name = "contiguous";
-                node->backward_fn = [](std::shared_ptr<Tensor> grad_out) {
-                    return std::vector<std::shared_ptr<Tensor>>{grad_out};
-                };
-                result->grad_fn = node;
-            }
-            return result;
-        })
-        .def("to_device", &Tensor::to_device)
+        .def("contiguous", [](std::shared_ptr<Tensor> self) { return dispatch_contiguous(self); })
+.def("to", [](std::shared_ptr<Tensor> self, std::string target_device) {
+    auto result = self->to_device(target_device);
+    if (g_grad_enabled && self->requires_grad && result.get() != self.get()) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {self};
+        node->op_name = "to_device";
+        auto origin_device = self->device;
+        node->backward_fn = [origin_device](std::shared_ptr<Tensor> grad_out) {
+            auto grad_input = grad_out->to_device(origin_device);
+            return std::vector<std::shared_ptr<Tensor>>{grad_input};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}, py::arg("target_device"))
+
         .def("to", &Tensor::to_device)
         .def("transpose", [](std::shared_ptr<Tensor> self, int dim0, int dim1) {
             auto result = self->transpose(dim0, dim1);
-            if (self->requires_grad) {
+            if (g_grad_enabled && self->requires_grad) {
                 result->requires_grad = true;
                 auto node = std::make_shared<Node>();
                 node->inputs = {self};
@@ -456,7 +548,7 @@ PYBIND11_MODULE(_C, m) {
         })
         .def_property_readonly("T", [](std::shared_ptr<Tensor> self) {
             auto result = self->transpose_all();
-            if (self->requires_grad) {
+            if (g_grad_enabled && self->requires_grad) {
                 result->requires_grad = true;
                 auto node = std::make_shared<Node>();
                 node->inputs = {self};
@@ -468,14 +560,15 @@ PYBIND11_MODULE(_C, m) {
             }
             return result;
         })
+        .def("backward", &tensor_backward, py::arg("grad_output") = nullptr, py::arg("retain_graph") = false)
         .def("zero_grad", &Tensor::zero_grad)
-        .def("backward", &tensor_backward, py::arg("grad_output") = nullptr)
+        .def("item", &Tensor::item)
         .def("__repr__", &Tensor::repr)
         .def("__str__", &Tensor::repr)
         .def("__len__", [](Tensor &t) { return t.shape.empty() ? 0 : t.shape[0]; })
         .def("view", [](std::shared_ptr<Tensor> self, std::vector<int> new_shape) {
             auto result = self->view(new_shape);
-            if (self->requires_grad) {
+            if (g_grad_enabled && self->requires_grad) {
                 result->requires_grad = true;
                 auto node = std::make_shared<Node>();
                 node->inputs = {self};
@@ -490,7 +583,7 @@ PYBIND11_MODULE(_C, m) {
         })
         .def("reshape", [](std::shared_ptr<Tensor> self, std::vector<int> new_shape) {
             auto result = self->reshape(new_shape);
-            if (self->requires_grad) {
+            if (g_grad_enabled && self->requires_grad) {
                 result->requires_grad = true;
                 auto node = std::make_shared<Node>();
                 node->inputs = {self};
@@ -507,64 +600,120 @@ PYBIND11_MODULE(_C, m) {
             if (dim.is_none()) return dispatch_sum_all(self);
             return dispatch_sum_axis(self, dim.cast<int>(), keepdim);
         }, py::arg("dim") = py::none(), py::arg("keepdim") = false)
+        .def("detach", &Tensor::detach)
         .def("__getitem__", [](std::shared_ptr<Tensor> self, py::object key) -> py::object {
-            std::vector<py::object> items;
-            if (py::isinstance<py::tuple>(key)) {
-                for (auto item : key) items.push_back(py::reinterpret_borrow<py::object>(item));
+    std::vector<py::object> items;
+    if (py::isinstance<py::tuple>(key)) {
+        for (auto item : key) items.push_back(py::reinterpret_borrow<py::object>(item));
+    } else {
+        items.push_back(key);
+    }
+    size_t ndim = self->shape.size();
+    if (items.size() > ndim)
+        throw std::out_of_range("Too many indices for tensor of dimension " + std::to_string(ndim));
+
+    std::vector<int> new_shape, new_strides;
+    int offset = 0;
+
+    // One IndexSpec per ORIGINAL dimension. Captured by the backward closure
+    // so it can reconstruct exactly how each original position maps to (or
+    // is dropped from) the sliced/indexed output — the inverse of the
+    // forward mapping computed below.
+    struct IndexSpec {
+        bool is_int;
+        int int_index;  // valid when is_int
+        int start;      // valid when !is_int
+        int step;       // valid when !is_int
+    };
+    std::vector<IndexSpec> specs(ndim);
+
+    for (size_t d = 0; d < ndim; ++d) {
+        if (d < items.size()) {
+            py::object sel = items[d];
+            if (py::isinstance<py::int_>(sel)) {
+                int i = sel.cast<int>();
+                int i_orig = i;
+                if (i < 0) i += self->shape[d];
+                if (i < 0 || i >= self->shape[d])
+                    throw std::out_of_range("Index " + std::to_string(i_orig) +
+                                             " out of range on dimension " + std::to_string(d) +
+                                             " (size " + std::to_string(self->shape[d]) + ")");
+                offset += i * self->strides[d];
+                specs[d] = {true, i, 0, 0};
+            } else if (py::isinstance<py::slice>(sel)) {
+                py::slice s = sel.cast<py::slice>();
+                size_t start, stop, step, slicelength;
+                if (!s.compute((size_t)self->shape[d], &start, &stop, &step, &slicelength))
+                    throw std::runtime_error("Invalid slice on dimension " + std::to_string(d));
+                offset += (int)start * self->strides[d];
+                new_shape.push_back((int)slicelength);
+                new_strides.push_back(self->strides[d] * (int)step);
+                specs[d] = {false, 0, (int)start, (int)step};
             } else {
-                items.push_back(key);
+                throw std::runtime_error("Index must be int or slice, got " +
+                                          py::str(sel.get_type()).cast<std::string>());
             }
-            size_t ndim = self->shape.size();
-            if (items.size() > ndim)
-                throw std::out_of_range("Too many indices for tensor of dimension " + std::to_string(ndim));
+        } else {
+            // Dimension not indexed at all: implicit full slice, kept as-is.
+            new_shape.push_back(self->shape[d]);
+            new_strides.push_back(self->strides[d]);
+            specs[d] = {false, 0, 0, 1};
+        }
+    }
 
-            std::vector<int> new_shape, new_strides;
-            int offset = 0;
-            bool all_int = true;
+    // Zero-copy view in all cases (including full-int indexing, which now
+    // yields a 0-d Tensor rather than a raw float — see note above).
+    auto result = std::make_shared<Tensor>(self, offset, new_shape, new_strides);
 
-            for (size_t d = 0; d < ndim; ++d) {
-                if (d < items.size()) {
-                    py::object sel = items[d];
-                    if (py::isinstance<py::int_>(sel)) {
-                        int i = sel.cast<int>();
-                        if (i < 0) i += self->shape[d];
-                        if (i < 0 || i >= self->shape[d])
-                            throw std::out_of_range("Index out of range on dimension " + std::to_string(d));
-                        offset += i * self->strides[d];
-                    } else if (py::isinstance<py::slice>(sel)) {
-                        all_int = false;
-                        py::slice s = sel.cast<py::slice>();
-                        size_t start, stop, step, slicelength;
-                        if (!s.compute((size_t)self->shape[d], &start, &stop, &step, &slicelength))
-                            throw std::runtime_error("Invalid slice");
-                        offset += (int)start * self->strides[d];
-                        new_shape.push_back((int)slicelength);
-                        new_strides.push_back(self->strides[d] * (int)step);
+    if (g_grad_enabled && self->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {self};
+        node->op_name = "getitem";
+        auto orig_shape = self->shape;
+        auto orig_device = self->device;
+        node->backward_fn = [orig_shape, orig_device, specs, new_shape](std::shared_ptr<Tensor> grad_out) {
+            // Scatter grad_out back into a zero tensor shaped like the
+            // original (pre-indexing) tensor. Every original element not
+            // covered by this indexing op correctly receives zero gradient.
+            auto grad_input = std::make_shared<Tensor>(orig_shape, orig_device);
+            grad_input->fill_zero();
+
+            size_t ndim_orig = orig_shape.size();
+            size_t ndim_new = new_shape.size();
+
+            int total_new = 1;
+            for (int s : new_shape) total_new *= s;  // == 1 if new_shape is empty (full-int case)
+
+            std::vector<int> new_idx(ndim_new, 0);
+            for (int flat = 0; flat < total_new; ++flat) {
+                float val = grad_out->get_scalar(new_idx);
+
+                std::vector<int> orig_idx(ndim_orig);
+                size_t j = 0;  // walks new_idx in lockstep with the non-int original dims
+                for (size_t d = 0; d < ndim_orig; ++d) {
+                    if (specs[d].is_int) {
+                        orig_idx[d] = specs[d].int_index;
                     } else {
-                        throw std::runtime_error("Index must be int or slice");
+                        orig_idx[d] = specs[d].start + new_idx[j] * specs[d].step;
+                        ++j;
                     }
-                } else {
-                    all_int = false;
-                    new_shape.push_back(self->shape[d]);
-                    new_strides.push_back(self->strides[d]);
+                }
+                grad_input->set_scalar(orig_idx, val);
+
+                for (int d = (int)ndim_new - 1; d >= 0; --d) {
+                    if (++new_idx[d] < new_shape[d]) break;
+                    new_idx[d] = 0;
                 }
             }
 
-            if (all_int) {
-                float value;
-#ifndef AAKAAR_NO_CUDA
-                if (self->device == "cuda") {
-                    cudaMemcpy(&value, self->data_ptr + offset, sizeof(float), cudaMemcpyDeviceToHost);
-                    return py::float_(value);
-                }
-#endif
-                value = self->data_ptr[offset];
-                return py::float_(value);
-            }
+            return std::vector<std::shared_ptr<Tensor>>{grad_input};
+        };
+        result->grad_fn = node;
+    }
 
-            auto view = std::make_shared<Tensor>(self, offset, new_shape, new_strides);
-            return py::cast(view);
-        })
+    return py::cast(result);
+})
         .def("__add__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_add(a, b); })
         .def("__add__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_add_scalar(a, s); })
         .def("__radd__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_add_scalar(a, s); })
@@ -576,6 +725,9 @@ PYBIND11_MODULE(_C, m) {
         .def("__truediv__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_div(a, b); })
         .def("__truediv__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_div_scalar(a, s); })
         .def("__matmul__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_matmul(a, b); });
+
+    m.def("_set_grad_enabled", [](bool enabled) { g_grad_enabled = enabled; });
+    m.def("_is_grad_enabled", []() { return g_grad_enabled; });
 
     m.def("fill_cpu_random", &fill_cpu_random, "Fill CPU Tensor with random numbers");
     m.def("cpu_matmul", &dispatch_matmul, "CPU matrix multiplication (autograd-aware)");

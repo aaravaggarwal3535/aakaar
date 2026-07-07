@@ -12,6 +12,27 @@ void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed) {
     }
 }
 
+static bool compute_broadcast_plan_cpu(const std::vector<int>& sa, const std::vector<int>& sta,
+                                        const std::vector<int>& sb, const std::vector<int>& stb,
+                                        std::vector<int>& out_shape,
+                                        std::vector<int>& pa_shape, std::vector<int>& pa_strides,
+                                        std::vector<int>& pb_shape, std::vector<int>& pb_strides) {
+    int nd = std::max(sa.size(), sb.size());
+    out_shape.resize(nd); pa_shape.resize(nd); pa_strides.resize(nd);
+    pb_shape.resize(nd); pb_strides.resize(nd);
+    for (int i = 0; i < nd; ++i) {
+        int ai = (int)sa.size() - nd + i;
+        int bi = (int)sb.size() - nd + i;
+        int da = ai >= 0 ? sa[ai] : 1;
+        int db = bi >= 0 ? sb[bi] : 1;
+        if (da != db && da != 1 && db != 1) return false;
+        out_shape[i] = std::max(da, db);
+        pa_shape[i] = da; pa_strides[i] = ai >= 0 ? sta[ai] : 0;
+        pb_shape[i] = db; pb_strides[i] = bi >= 0 ? stb[bi] : 0;
+    }
+    return true;
+}
+
 std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
     if (!a->is_contiguous() || !b->is_contiguous())
         throw std::invalid_argument("matmul requires contiguous tensors. Call .contiguous() first.");
@@ -68,10 +89,36 @@ std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_pt
     return result;
 }
 
-std::shared_ptr<Tensor> run_cpu_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    if (a->shape != b->shape) {
-        throw std::invalid_argument("Shape mismatch in elementwise op");
+template <typename F>
+static std::shared_ptr<Tensor> run_cpu_broadcast_elementwise(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b, F op) {
+    std::vector<int> out_shape, pa_shape, pa_strides, pb_shape, pb_strides;
+    if (!compute_broadcast_plan_cpu(a->shape, a->strides, b->shape, b->strides,
+                                     out_shape, pa_shape, pa_strides, pb_shape, pb_strides))
+        throw std::invalid_argument("Shapes are not broadcastable for elementwise op: " +
+                                     a->shape_str() + " vs " + b->shape_str());
+
+    auto result = std::make_shared<Tensor>(out_shape, std::string("cpu"));
+    int ndim = (int)out_shape.size();
+    std::vector<int> idx(ndim, 0);
+    for (int flat = 0; flat < result->size; ++flat) {
+        int a_off = 0, b_off = 0;
+        for (int d = 0; d < ndim; ++d) {
+            int ai = (pa_shape[d] == 1) ? 0 : idx[d];
+            int bi = (pb_shape[d] == 1) ? 0 : idx[d];
+            a_off += ai * pa_strides[d];
+            b_off += bi * pb_strides[d];
+        }
+        result->data_ptr[flat] = op(a->data_ptr[a_off], b->data_ptr[b_off]);
+        for (int d = ndim - 1; d >= 0; --d) {
+            if (++idx[d] < out_shape[d]) break;
+            idx[d] = 0;
+        }
     }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x+y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     for (int i = 0; i < a->size; ++i) {
         result->data_ptr[i] = a->get_scalar_flat(i) + b->get_scalar_flat(i);
@@ -80,9 +127,7 @@ std::shared_ptr<Tensor> run_cpu_add(std::shared_ptr<Tensor> a, std::shared_ptr<T
 }
 
 std::shared_ptr<Tensor> run_cpu_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    if (a->shape != b->shape) {
-        throw std::invalid_argument("Shape mismatch in elementwise op");
-    }
+    if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x-y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     for (int i = 0; i < a->size; ++i) {
         result->data_ptr[i] = a->get_scalar_flat(i) - b->get_scalar_flat(i);
@@ -91,14 +136,14 @@ std::shared_ptr<Tensor> run_cpu_sub(std::shared_ptr<Tensor> a, std::shared_ptr<T
 }
 
 std::shared_ptr<Tensor> run_cpu_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    if (a->shape != b->shape) throw std::invalid_argument("Shape mismatch in elementwise op");
+    if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x*y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) * b->get_scalar_flat(i);
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    if (a->shape != b->shape) throw std::invalid_argument("Shape mismatch in elementwise op");
+    if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x/y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) / b->get_scalar_flat(i);
     return result;

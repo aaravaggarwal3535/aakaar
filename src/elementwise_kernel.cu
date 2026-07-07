@@ -6,6 +6,104 @@
 enum class ElementwiseOp { ADD, SUB, MUL, DIV };
 
 // ---- Tensor op Tensor ----
+// Add these broadcast-aware kernels alongside your existing vectorized ones.
+// Non-vectorized (no float4) since broadcast index math varies per-element;
+// correctness-first, can optimize later if profiling shows this matters.
+
+__device__ __forceinline__ int broadcast_index(int out_idx, const int* out_shape,
+                                                 const int* in_strides, const int* in_shape,
+                                                 int ndim) {
+    int idx = 0;
+    int remaining = out_idx;
+    for (int d = ndim - 1; d >= 0; --d) {
+        int coord = remaining % out_shape[d];
+        remaining /= out_shape[d];
+        int in_coord = (in_shape[d] == 1) ? 0 : coord;
+        idx += in_coord * in_strides[d];
+    }
+    return idx;
+}
+
+template <ElementwiseOp OP>
+__global__ void broadcast_elementwise_kernel(const float* __restrict__ a, const int* a_shape, const int* a_strides,
+                                              const float* __restrict__ b, const int* b_shape, const int* b_strides,
+                                              float* __restrict__ c, const int* out_shape,
+                                              int ndim, int out_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= out_size) return;
+
+    int a_off = broadcast_index(idx, out_shape, a_strides, a_shape, ndim);
+    int b_off = broadcast_index(idx, out_shape, b_strides, b_shape, ndim);
+
+    float av = a[a_off], bv = b[b_off];
+    float result;
+    if constexpr (OP == ElementwiseOp::ADD) result = av + bv;
+    else if constexpr (OP == ElementwiseOp::SUB) result = av - bv;
+    else if constexpr (OP == ElementwiseOp::MUL) result = av * bv;
+    else result = av / bv;
+    c[idx] = result;
+}
+
+// Computes right-aligned broadcast output shape + per-input padded shape/strides.
+// Returns false if shapes are not broadcast-compatible.
+static bool compute_broadcast_plan(const std::vector<int>& sa, const std::vector<int>& sta,
+                                    const std::vector<int>& sb, const std::vector<int>& stb,
+                                    std::vector<int>& out_shape,
+                                    std::vector<int>& pa_shape, std::vector<int>& pa_strides,
+                                    std::vector<int>& pb_shape, std::vector<int>& pb_strides) {
+    int nd = std::max(sa.size(), sb.size());
+    out_shape.resize(nd); pa_shape.resize(nd); pa_strides.resize(nd);
+    pb_shape.resize(nd); pb_strides.resize(nd);
+    for (int i = 0; i < nd; ++i) {
+        int ai = (int)sa.size() - nd + i;
+        int bi = (int)sb.size() - nd + i;
+        int da = ai >= 0 ? sa[ai] : 1;
+        int db = bi >= 0 ? sb[bi] : 1;
+        if (da != db && da != 1 && db != 1) return false;
+        out_shape[i] = std::max(da, db);
+        pa_shape[i] = da; pa_strides[i] = ai >= 0 ? sta[ai] : 0;
+        pb_shape[i] = db; pb_strides[i] = bi >= 0 ? stb[bi] : 0;
+    }
+    return true;
+}
+
+template <ElementwiseOp OP>
+static std::shared_ptr<Tensor> run_cuda_broadcast_elementwise(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    std::vector<int> out_shape, pa_shape, pa_strides, pb_shape, pb_strides;
+    if (!compute_broadcast_plan(a->shape, a->strides, b->shape, b->strides,
+                                 out_shape, pa_shape, pa_strides, pb_shape, pb_strides))
+        throw std::invalid_argument("Shapes are not broadcastable for elementwise op: " +
+                                     a->shape_str() + " vs " + b->shape_str());
+
+    auto result = std::make_shared<Tensor>(out_shape, std::string("cuda"));
+    int out_size = result->size;
+    int ndim = (int)out_shape.size();
+
+    int *d_out_shape, *d_a_shape, *d_a_strides, *d_b_shape, *d_b_strides;
+    cudaMalloc(&d_out_shape, ndim * sizeof(int));
+    cudaMalloc(&d_a_shape, ndim * sizeof(int));
+    cudaMalloc(&d_a_strides, ndim * sizeof(int));
+    cudaMalloc(&d_b_shape, ndim * sizeof(int));
+    cudaMalloc(&d_b_strides, ndim * sizeof(int));
+    cudaMemcpy(d_out_shape, out_shape.data(), ndim * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_a_shape, pa_shape.data(), ndim * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_a_strides, pa_strides.data(), ndim * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b_shape, pb_shape.data(), ndim * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b_strides, pb_strides.data(), ndim * sizeof(int), cudaMemcpyHostToDevice);
+
+    int threads = 256;
+    int blocks = (out_size + threads - 1) / threads;
+    broadcast_elementwise_kernel<OP><<<blocks, threads>>>(
+        a->data_ptr, d_a_shape, d_a_strides,
+        b->data_ptr, d_b_shape, d_b_strides,
+        result->data_ptr, d_out_shape, ndim, out_size
+    );
+    cudaError_t err = cudaGetLastError();
+    cudaFree(d_out_shape); cudaFree(d_a_shape); cudaFree(d_a_strides); cudaFree(d_b_shape); cudaFree(d_b_strides);
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    cudaDeviceSynchronize();
+    return result;
+}
 
 template <ElementwiseOp OP>
 __global__ void vector_elementwise_vectorized(const float* __restrict__ a,
@@ -133,10 +231,14 @@ static std::shared_ptr<Tensor> run_cuda_scalar(std::shared_ptr<Tensor> a, float 
     return result;
 }
 
-std::shared_ptr<Tensor> run_cuda_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return run_cuda_elementwise<ElementwiseOp::ADD>(a, b); }
-std::shared_ptr<Tensor> run_cuda_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return run_cuda_elementwise<ElementwiseOp::SUB>(a, b); }
-std::shared_ptr<Tensor> run_cuda_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return run_cuda_elementwise<ElementwiseOp::MUL>(a, b); }
-std::shared_ptr<Tensor> run_cuda_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return run_cuda_elementwise<ElementwiseOp::DIV>(a, b); }
+std::shared_ptr<Tensor> run_cuda_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { if (a->shape != b->shape) return run_cuda_broadcast_elementwise<ElementwiseOp::ADD>(a, b);
+    return run_cuda_elementwise<ElementwiseOp::ADD>(a, b); }
+std::shared_ptr<Tensor> run_cuda_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { if (a->shape != b->shape) return run_cuda_broadcast_elementwise<ElementwiseOp::SUB>(a, b);
+    return run_cuda_elementwise<ElementwiseOp::SUB>(a, b); }
+std::shared_ptr<Tensor> run_cuda_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { if (a->shape != b->shape) return run_cuda_broadcast_elementwise<ElementwiseOp::MUL>(a, b);
+    return run_cuda_elementwise<ElementwiseOp::MUL>(a, b); }
+std::shared_ptr<Tensor> run_cuda_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { if (a->shape != b->shape) return run_cuda_broadcast_elementwise<ElementwiseOp::DIV>(a, b);
+    return run_cuda_elementwise<ElementwiseOp::DIV>(a, b); }
 
 std::shared_ptr<Tensor> run_cuda_add_scalar(std::shared_ptr<Tensor> a, float s) { return run_cuda_scalar<ElementwiseOp::ADD>(a, s); }
 std::shared_ptr<Tensor> run_cuda_sub_scalar(std::shared_ptr<Tensor> a, float s) { return run_cuda_scalar<ElementwiseOp::SUB>(a, s); }

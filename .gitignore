@@ -20,3 +20,4 @@ dist/
 .pypirc
 
 build_script.txt
+test.py

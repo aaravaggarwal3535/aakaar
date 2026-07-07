@@ -1,5 +1,6 @@
 import os
 import sys
+import contextlib
 
 __version__ = "0.1.8"
 
@@ -94,3 +95,20 @@ class _CudaNamespace:
     device_count = staticmethod(device_count)
 
 cuda = _CudaNamespace()
+
+@contextlib.contextmanager
+def no_grad():
+    """Disables gradient tracking for the duration of the with-block.
+    Use this when updating parameters so the update itself isn't tracked:
+        with aakaar.no_grad():
+            w = w - lr * w.grad
+    """
+    prev = _C._is_grad_enabled()
+    _C._set_grad_enabled(False)
+    try:
+        yield
+    finally:
+        _C._set_grad_enabled(prev)
+
+def is_grad_enabled():
+    return _C._is_grad_enabled()
