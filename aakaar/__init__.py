@@ -112,3 +112,21 @@ def no_grad():
 
 def is_grad_enabled():
     return _C._is_grad_enabled()
+
+# In __init__.py — no new C++ needed at all
+def mse_loss(pred, target):
+    diff = pred - target
+    return (diff * diff).sum() / pred.size
+
+def from_numpy(array, device: str = "cpu", requires_grad: bool = False):
+    if device == "cuda" and not _C.HAS_CUDA:
+        raise RuntimeError(
+            "This installation of aakaar was built without CUDA support. "
+            "Install on a machine with the CUDA toolkit available, or use device='cpu'."
+        )
+    return _C.from_numpy(array, device, requires_grad)
+
+def zero_grad_all(parameters):
+    """Zero the .grad of every tensor in an iterable, e.g. a list of parameters."""
+    for p in parameters:
+        p.zero_grad()

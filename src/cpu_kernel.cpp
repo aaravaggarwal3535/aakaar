@@ -1,3 +1,4 @@
+#include <cmath>
 #include <random>
 #include <memory>
 #include <stdexcept>
@@ -238,6 +239,54 @@ std::shared_ptr<Tensor> run_cpu_broadcast_axis(std::shared_ptr<Tensor> a, int di
                     a->data_ptr[o * inner_size + i];
             }
         }
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_relu(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) {
+        float v = a->get_scalar_flat(i);
+        result->data_ptr[i] = v > 0.0f ? v : 0.0f;
+    }
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
+    for (int i = 0; i < input->size; ++i) {
+        result->data_ptr[i] = input->get_scalar_flat(i) > 0.0f ? grad_out->data_ptr[i] : 0.0f;
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_sigmoid(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) {
+        result->data_ptr[i] = 1.0f / (1.0f + std::exp(-a->get_scalar_flat(i)));
+    }
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_sigmoid_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> sig_output) {
+    auto result = std::make_shared<Tensor>(sig_output->shape, std::string("cpu"));
+    for (int i = 0; i < sig_output->size; ++i) {
+        float s = sig_output->data_ptr[i];
+        result->data_ptr[i] = grad_out->data_ptr[i] * s * (1.0f - s);
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_tanh(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) {
+        result->data_ptr[i] = std::tanh(a->get_scalar_flat(i));
+    }
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_tanh_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> tanh_output) {
+    auto result = std::make_shared<Tensor>(tanh_output->shape, std::string("cpu"));
+    for (int i = 0; i < tanh_output->size; ++i) {
+        float t = tanh_output->data_ptr[i];
+        result->data_ptr[i] = grad_out->data_ptr[i] * (1.0f - t * t);
     }
     return result;
 }

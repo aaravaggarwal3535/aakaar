@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include "tensor.h"
 
+
 namespace py = pybind11;
 
 static bool g_grad_enabled = true;
@@ -24,6 +25,12 @@ std::shared_ptr<Tensor> run_cpu_div_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cpu_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
 std::shared_ptr<Tensor> run_cpu_sum_all(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size);
+std::shared_ptr<Tensor> run_cpu_relu(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cpu_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
+std::shared_ptr<Tensor> run_cpu_sigmoid(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cpu_sigmoid_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> sig_output);
+std::shared_ptr<Tensor> run_cpu_tanh(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cpu_tanh_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> tanh_output);
 
 
 #ifndef AAKAAR_NO_CUDA
@@ -41,6 +48,12 @@ std::shared_ptr<Tensor> run_cuda_div_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cuda_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
 std::shared_ptr<Tensor> run_cuda_sum_all(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size);
+std::shared_ptr<Tensor> run_cuda_relu(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cuda_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
+std::shared_ptr<Tensor> run_cuda_sigmoid(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cuda_sigmoid_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> sig_output);
+std::shared_ptr<Tensor> run_cuda_tanh(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cuda_tanh_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> tanh_output);
 void empty_cache() { CachingAllocator::get_instance().empty_cache(); }
 #endif
 
@@ -140,6 +153,83 @@ static std::shared_ptr<Tensor> dispatch_div_scalar(std::shared_ptr<Tensor> a, fl
         node->backward_fn = [s](std::shared_ptr<Tensor> grad_out) {
             auto da = dispatch_div_scalar(grad_out, s);
             return std::vector<std::shared_ptr<Tensor>>{da};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_relu(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) a = dispatch_contiguous(a);
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_relu(a);
+    else
+#endif
+    result = run_cpu_relu(a);
+
+    if (g_grad_enabled && a->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a};
+        node->op_name = "relu";
+        node->backward_fn = [a](std::shared_ptr<Tensor> grad_out) {
+#ifndef AAKAAR_NO_CUDA
+            if (a->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_relu_backward(grad_out, a)};
+#endif
+            return std::vector<std::shared_ptr<Tensor>>{run_cpu_relu_backward(grad_out, a)};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_sigmoid(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) a = dispatch_contiguous(a);
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_sigmoid(a);
+    else
+#endif
+    result = run_cpu_sigmoid(a);
+
+    if (g_grad_enabled && a->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a};
+        node->op_name = "sigmoid";
+        auto output_copy = result;  // capture the OUTPUT, since sigmoid's derivative uses it, not the input
+        node->backward_fn = [output_copy](std::shared_ptr<Tensor> grad_out) {
+#ifndef AAKAAR_NO_CUDA
+            if (output_copy->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_sigmoid_backward(grad_out, output_copy)};
+#endif
+            return std::vector<std::shared_ptr<Tensor>>{run_cpu_sigmoid_backward(grad_out, output_copy)};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_tanh(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) a = dispatch_contiguous(a);
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_tanh(a);
+    else
+#endif
+    result = run_cpu_tanh(a);
+
+    if (g_grad_enabled && a->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a};
+        node->op_name = "tanh";
+        auto output_copy = result;
+        node->backward_fn = [output_copy](std::shared_ptr<Tensor> grad_out) {
+#ifndef AAKAAR_NO_CUDA
+            if (output_copy->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_tanh_backward(grad_out, output_copy)};
+#endif
+            return std::vector<std::shared_ptr<Tensor>>{run_cpu_tanh_backward(grad_out, output_copy)};
         };
         result->grad_fn = node;
     }
@@ -496,7 +586,17 @@ static std::shared_ptr<Tensor> dispatch_matmul(std::shared_ptr<Tensor> a, std::s
     }
     return result;
 }
+static std::shared_ptr<Tensor> tensor_from_numpy(py::array_t<float, py::array::c_style | py::array::forcecast> arr,
+                                                  std::string device, bool requires_grad) {
+    py::buffer_info buf = arr.request();
+    std::vector<int> shape;
+    for (auto d : buf.shape) shape.push_back((int)d);
+    if (shape.empty()) shape.push_back(1);  // treat a numpy scalar as a size-1 tensor
 
+    auto result = Tensor::from_buffer(static_cast<const float*>(buf.ptr), shape, device);
+    result->requires_grad = requires_grad;
+    return result;
+}
 // ---- Module definition ----
 
 PYBIND11_MODULE(_C, m) {
@@ -510,6 +610,10 @@ PYBIND11_MODULE(_C, m) {
         .def_readonly("grad", &Tensor::grad)
         .def("to_numpy", &Tensor::to_numpy)
         .def("is_contiguous", &Tensor::is_contiguous)
+        .def("relu", [](std::shared_ptr<Tensor> self) { return dispatch_relu(self); })
+        .def("sigmoid", [](std::shared_ptr<Tensor> self) { return dispatch_sigmoid(self); })
+        .def("tanh", [](std::shared_ptr<Tensor> self) { return dispatch_tanh(self); })
+        .def("copy_", &Tensor::copy_)
         .def("contiguous", [](std::shared_ptr<Tensor> self) { return dispatch_contiguous(self); })
 .def("to", [](std::shared_ptr<Tensor> self, std::string target_device) {
     auto result = self->to_device(target_device);
@@ -733,6 +837,9 @@ PYBIND11_MODULE(_C, m) {
     m.def("cpu_matmul", &dispatch_matmul, "CPU matrix multiplication (autograd-aware)");
     m.def("cpu_add", &dispatch_add);
     m.def("cpu_sub", &dispatch_sub);
+    m.def("from_numpy", &tensor_from_numpy,
+          py::arg("array"), py::arg("device") = "cpu", py::arg("requires_grad") = false,
+          "Create a Tensor from an existing numpy array, copying its data.");
 
 #ifndef AAKAAR_NO_CUDA
     m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");

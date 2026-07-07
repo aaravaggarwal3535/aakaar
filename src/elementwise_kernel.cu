@@ -231,6 +231,8 @@ static std::shared_ptr<Tensor> run_cuda_scalar(std::shared_ptr<Tensor> a, float 
     return result;
 }
 
+
+
 std::shared_ptr<Tensor> run_cuda_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { if (a->shape != b->shape) return run_cuda_broadcast_elementwise<ElementwiseOp::ADD>(a, b);
     return run_cuda_elementwise<ElementwiseOp::ADD>(a, b); }
 std::shared_ptr<Tensor> run_cuda_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { if (a->shape != b->shape) return run_cuda_broadcast_elementwise<ElementwiseOp::SUB>(a, b);
@@ -244,3 +246,331 @@ std::shared_ptr<Tensor> run_cuda_add_scalar(std::shared_ptr<Tensor> a, float s) 
 std::shared_ptr<Tensor> run_cuda_sub_scalar(std::shared_ptr<Tensor> a, float s) { return run_cuda_scalar<ElementwiseOp::SUB>(a, s); }
 std::shared_ptr<Tensor> run_cuda_mul_scalar(std::shared_ptr<Tensor> a, float s) { return run_cuda_scalar<ElementwiseOp::MUL>(a, s); }
 std::shared_ptr<Tensor> run_cuda_div_scalar(std::shared_ptr<Tensor> a, float s) { return run_cuda_scalar<ElementwiseOp::DIV>(a, s); }
+// ============================================================================
+// Elementwise activation kernels: relu, sigmoid, tanh (forward + backward)
+// ============================================================================
+
+#include <cstdint>
+
+static inline bool is_aligned16(const void* ptr) {
+    return (reinterpret_cast<uintptr_t>(ptr) & 0xF) == 0;
+}
+
+static int elem_blocks(int n) {
+    if (n <= 0) return 0;
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    if (blocks > 65535) blocks = 65535;
+    return blocks;
+}
+
+// ---------------------------------------------------------------------------
+// RELU
+// ---------------------------------------------------------------------------
+
+__global__ void relu_forward_scalar_kernel(const float* __restrict__ in, float* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float v = __ldg(&in[i]);
+        out[i] = v > 0.0f ? v : 0.0f;
+    }
+}
+
+__global__ void relu_forward_vec4_kernel(const float4* __restrict__ in, float4* __restrict__ out, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 v = __ldg(&in[i]);
+        float4 r;
+        r.x = v.x > 0.0f ? v.x : 0.0f;
+        r.y = v.y > 0.0f ? v.y : 0.0f;
+        r.z = v.z > 0.0f ? v.z : 0.0f;
+        r.w = v.w > 0.0f ? v.w : 0.0f;
+        out[i] = r;
+    }
+}
+
+__global__ void relu_backward_scalar_kernel(const float* __restrict__ grad_out, const float* __restrict__ in,
+                                             float* __restrict__ grad_in, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float x = __ldg(&in[i]);
+        float g = __ldg(&grad_out[i]);
+        grad_in[i] = x > 0.0f ? g : 0.0f;
+    }
+}
+
+__global__ void relu_backward_vec4_kernel(const float4* __restrict__ grad_out, const float4* __restrict__ in,
+                                           float4* __restrict__ grad_in, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 x = __ldg(&in[i]);
+        float4 g = __ldg(&grad_out[i]);
+        float4 r;
+        r.x = x.x > 0.0f ? g.x : 0.0f;
+        r.y = x.y > 0.0f ? g.y : 0.0f;
+        r.z = x.z > 0.0f ? g.z : 0.0f;
+        r.w = x.w > 0.0f ? g.w : 0.0f;
+        grad_in[i] = r;
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_relu(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) throw std::invalid_argument("relu requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
+    int n = a->size;
+    if (n == 0) return result;
+    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        relu_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(a->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), n4);
+        if (tail > 0) {
+            relu_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, tail);
+        }
+    } else {
+        relu_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cuda"));
+    int n = input->size;
+    if (n == 0) return result;
+    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
+                            && is_aligned16(input->data_ptr)
+                            && is_aligned16(result->data_ptr);
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        relu_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(grad_out->data_ptr),
+            reinterpret_cast<const float4*>(input->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), n4);
+        if (tail > 0) {
+            relu_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                grad_out->data_ptr + n4 * 4, input->data_ptr + n4 * 4,
+                result->data_ptr + n4 * 4, tail);
+        }
+    } else {
+        relu_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
+            grad_out->data_ptr, input->data_ptr, result->data_ptr, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// SIGMOID
+// ---------------------------------------------------------------------------
+
+__global__ void sigmoid_forward_scalar_kernel(const float* __restrict__ in, float* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float v = __ldg(&in[i]);
+        out[i] = 1.0f / (1.0f + expf(-v));
+    }
+}
+
+__global__ void sigmoid_forward_vec4_kernel(const float4* __restrict__ in, float4* __restrict__ out, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 v = __ldg(&in[i]);
+        float4 r;
+        r.x = 1.0f / (1.0f + expf(-v.x));
+        r.y = 1.0f / (1.0f + expf(-v.y));
+        r.z = 1.0f / (1.0f + expf(-v.z));
+        r.w = 1.0f / (1.0f + expf(-v.w));
+        out[i] = r;
+    }
+}
+
+__global__ void sigmoid_backward_scalar_kernel(const float* __restrict__ grad_out, const float* __restrict__ sig_out,
+                                                float* __restrict__ grad_in, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float s = __ldg(&sig_out[i]);
+        float g = __ldg(&grad_out[i]);
+        grad_in[i] = g * s * (1.0f - s);
+    }
+}
+
+__global__ void sigmoid_backward_vec4_kernel(const float4* __restrict__ grad_out, const float4* __restrict__ sig_out,
+                                              float4* __restrict__ grad_in, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 s = __ldg(&sig_out[i]);
+        float4 g = __ldg(&grad_out[i]);
+        float4 r;
+        r.x = g.x * s.x * (1.0f - s.x);
+        r.y = g.y * s.y * (1.0f - s.y);
+        r.z = g.z * s.z * (1.0f - s.z);
+        r.w = g.w * s.w * (1.0f - s.w);
+        grad_in[i] = r;
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_sigmoid(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) throw std::invalid_argument("sigmoid requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
+    int n = a->size;
+    if (n == 0) return result;
+    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        sigmoid_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(a->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), n4);
+        if (tail > 0) {
+            sigmoid_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, tail);
+        }
+    } else {
+        sigmoid_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_sigmoid_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> sig_output) {
+    auto result = std::make_shared<Tensor>(sig_output->shape, std::string("cuda"));
+    int n = sig_output->size;
+    if (n == 0) return result;
+    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
+                            && is_aligned16(sig_output->data_ptr)
+                            && is_aligned16(result->data_ptr);
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        sigmoid_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(grad_out->data_ptr),
+            reinterpret_cast<const float4*>(sig_output->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), n4);
+        if (tail > 0) {
+            sigmoid_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                grad_out->data_ptr + n4 * 4, sig_output->data_ptr + n4 * 4,
+                result->data_ptr + n4 * 4, tail);
+        }
+    } else {
+        sigmoid_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
+            grad_out->data_ptr, sig_output->data_ptr, result->data_ptr, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// TANH
+// ---------------------------------------------------------------------------
+
+__global__ void tanh_forward_scalar_kernel(const float* __restrict__ in, float* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        out[i] = tanhf(__ldg(&in[i]));
+    }
+}
+
+__global__ void tanh_forward_vec4_kernel(const float4* __restrict__ in, float4* __restrict__ out, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 v = __ldg(&in[i]);
+        float4 r;
+        r.x = tanhf(v.x);
+        r.y = tanhf(v.y);
+        r.z = tanhf(v.z);
+        r.w = tanhf(v.w);
+        out[i] = r;
+    }
+}
+
+__global__ void tanh_backward_scalar_kernel(const float* __restrict__ grad_out, const float* __restrict__ tanh_out,
+                                             float* __restrict__ grad_in, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float t = __ldg(&tanh_out[i]);
+        float g = __ldg(&grad_out[i]);
+        grad_in[i] = g * (1.0f - t * t);
+    }
+}
+
+__global__ void tanh_backward_vec4_kernel(const float4* __restrict__ grad_out, const float4* __restrict__ tanh_out,
+                                           float4* __restrict__ grad_in, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 t = __ldg(&tanh_out[i]);
+        float4 g = __ldg(&grad_out[i]);
+        float4 r;
+        r.x = g.x * (1.0f - t.x * t.x);
+        r.y = g.y * (1.0f - t.y * t.y);
+        r.z = g.z * (1.0f - t.z * t.z);
+        r.w = g.w * (1.0f - t.w * t.w);
+        grad_in[i] = r;
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_tanh(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) throw std::invalid_argument("tanh requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
+    int n = a->size;
+    if (n == 0) return result;
+    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        tanh_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(a->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), n4);
+        if (tail > 0) {
+            tanh_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, tail);
+        }
+    } else {
+        tanh_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_tanh_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> tanh_output) {
+    auto result = std::make_shared<Tensor>(tanh_output->shape, std::string("cuda"));
+    int n = tanh_output->size;
+    if (n == 0) return result;
+    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
+                            && is_aligned16(tanh_output->data_ptr)
+                            && is_aligned16(result->data_ptr);
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        tanh_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(grad_out->data_ptr),
+            reinterpret_cast<const float4*>(tanh_output->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), n4);
+        if (tail > 0) {
+            tanh_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                grad_out->data_ptr + n4 * 4, tanh_output->data_ptr + n4 * 4,
+                result->data_ptr + n4 * 4, tail);
+        }
+    } else {
+        tanh_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
+            grad_out->data_ptr, tanh_output->data_ptr, result->data_ptr, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}

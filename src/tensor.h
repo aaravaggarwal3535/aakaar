@@ -155,8 +155,17 @@ void zero_grad() {
     grad = nullptr;
 }
 
-// Add inside the Tensor class, near contiguous()
-
+static std::shared_ptr<Tensor> from_buffer(const float* src, std::vector<int> shp, std::string dev) {
+    auto result = std::make_shared<Tensor>(shp, dev);
+#ifndef AAKAAR_NO_CUDA
+    if (dev == "cuda") {
+        cudaMemcpy(result->data_ptr, src, result->size * sizeof(float), cudaMemcpyHostToDevice);
+        return result;
+    }
+#endif
+    std::memcpy(result->data_ptr, src, result->size * sizeof(float));
+    return result;
+}
 // Strict zero-copy reshape. Fails if the tensor isn't contiguous, matching torch's .view().
 std::shared_ptr<Tensor> view(std::vector<int> new_shape) {
     int new_size = 1;
@@ -216,6 +225,21 @@ std::shared_ptr<Tensor> reshape(std::vector<int> new_shape) {
         }
         return result;
     }
+
+void copy_(std::shared_ptr<Tensor> other) {
+    if (shape != other->shape)
+        throw std::invalid_argument("copy_(): shape mismatch, self=" + shape_str() +
+                                     " other=" + other->shape_str());
+    std::vector<int> idx(shape.size(), 0);
+    for (int flat = 0; flat < size; ++flat) {
+        float v = other->get_scalar(idx);
+        set_scalar(idx, v);
+        for (int d = (int)shape.size() - 1; d >= 0; --d) {
+            if (++idx[d] < shape[d]) break;
+            idx[d] = 0;
+        }
+    }
+}
 
     std::shared_ptr<Tensor> to_device(std::string target_device) {
         if (target_device == device) {
