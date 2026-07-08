@@ -1,475 +1,117 @@
 # Aakaar
 
-<p align="center">
-  <b>A lightweight, high-performance C++/CUDA tensor engine for Python.</b><br>
-  Built from scratch using Python, C++, raw CUDA, cuBLAS, cuRAND, and pybind11.
-</p>
+Aakaar is a custom, standalone deep learning library built from the ground up using Python, C++, and raw CUDA. It implements N-dimensional tensors, a broadcasting-aware reverse-mode autograd engine, and a small set of neural network building blocks — all without relying on PyTorch, TensorFlow, or any other heavy external framework.
 
----
+## Core Architecture
 
-## Overview
+Aakaar's `Tensor` is a custom C++ object that can live directly in GPU VRAM or in host memory, exposed to Python via pybind11. Tensors carry their own `shape` and `strides`, so operations like slicing, transposing, and reshaping return lightweight zero-copy views into the same underlying memory wherever possible — data only moves when you explicitly ask for it via `.to_numpy()` or `.to(device)`.
 
-**Aakaar** is a standalone tensor computation library designed to provide transparent, high-performance numerical computing without relying on heavyweight deep learning frameworks.
+Every differentiable operation records itself into a dynamic computation graph (`grad_fn`), which `.backward()` walks in reverse topological order to compute gradients — the same fundamental design as PyTorch's autograd, built independently from scratch.
 
-Unlike traditional libraries that abstract away the underlying implementation, Aakaar exposes a clean Python API backed by a custom C++ tensor engine capable of running on both CPU and NVIDIA GPUs.
+## Current capabilities
 
-Its goal is to serve as both a practical tensor library and an educational framework for understanding how modern AI frameworks work internally.
+**Tensors**
+- N-dimensional tensors on CPU or CUDA, with real shape/stride tracking
+- Zero-copy views: slicing (`t[1:3, 2:4]`, negative indices, step slicing), `.transpose()`, `.T` (full axis reversal), `.view()` / `.reshape()`
+- `.contiguous()` to materialize a view when an operation requires dense memory
+- `from_numpy()` to load real data in; `.to_numpy()` to get it back out
+- `.to(device)` / `.to_device()` to move tensors between CPU and CUDA
 
----
+**Autograd**
+- `requires_grad`, `.grad`, `.backward()` with correct gradient accumulation across branching (diamond) graphs
+- `retain_graph` support for reusing a graph across multiple backward passes
+- `no_grad()` context manager and `.detach()` for inference / parameter-update code that shouldn't be tracked
+- Broadcasting-aware gradients for every elementwise and matmul operation, verified against numerical (finite-difference) gradients, not just symbolic derivation
 
-# Features
+**Operations**
+- Elementwise: `+`, `-`, `*`, `/` (tensor-tensor and tensor-scalar, with full broadcasting), unary negation
+- `matmul()` / `@`: N-dimensional, batched, with broadcasting batch dimensions on both forward and backward
+- Reductions: `sum(dim=...)`, `sum()` (full reduction), `max(dim=...)` (with correct argmax-routed gradients)
+- Activations: `relu`, `sigmoid`, `tanh`, `leaky_relu` — all with float4-vectorized CUDA kernels and an alignment-safe scalar fallback
+- `exp()`, `log()`
+- `softmax()` (numerically stable, max-subtraction based) and `cross_entropy_from_probs()`
 
-### 🚀 High Performance
+**Neural network building blocks** (`aakaar.nn`, `aakaar.optim`)
+- `nn.Linear` — a fully-connected layer with standard uniform initialization
+- `optim.SGD` — gradient descent optimizer using in-place parameter updates (`copy_()`) so parameter objects keep their identity across training steps
+- `zero_grad_all()` for clearing gradients across a parameter list
 
-- Native C++ tensor engine
-- Raw CUDA kernels for GPU execution
-- Optimized matrix multiplication using **cuBLAS**
-- Random number generation using **cuRAND**
+**Automatic CPU fallback**
+- If no CUDA toolkit is available at install time, Aakaar builds a CPU-only extension automatically. `device="cpu"` works everywhere; `device="cuda"` raises a clear error on CPU-only builds instead of failing to install.
 
----
-
-### 🧠 Custom Tensor Implementation
-
-- N-dimensional tensors
-- Shape and stride aware
-- Supports arbitrary dimensions
-- Automatic memory management
-- CPU and GPU tensor storage
-
-Example:
-
-```python
-import aakaar
-
-x = aakaar.rand((3,4))
-print(x.shape)
-```
-
----
-
-### ⚡ Dual Device Support
-
-Create tensors directly on either CPU or GPU.
-
-```python
-cpu_tensor = aakaar.rand((4,4), device="cpu")
-
-gpu_tensor = aakaar.rand((4,4), device="cuda")
-```
-
-If CUDA is unavailable, Aakaar automatically falls back to CPU mode.
-
----
-
-### 📐 Zero-Copy Tensor Views
-
-Tensor slicing never copies memory.
-
-Instead, Aakaar creates lightweight tensor views by modifying only:
-
-- shape
-- strides
-- storage offset
-
-Example:
-
-```python
-x = aakaar.rand((5,5))
-
-view = x[1:4, 2:5]
-
-print(view.shape)
-```
-
-The returned tensor references the original memory.
-
-No additional allocation occurs.
-
-Supported slicing includes:
-
-- Integer indexing
-- Negative indexing
-- Range slicing
-- Step slicing
-- Multi-dimensional slicing
-
-Examples:
-
-```python
-x[2]
-
-x[-1]
-
-x[1:4]
-
-x[:,2]
-
-x[::2]
-
-x[1:4,2:5]
-```
-
----
-
-### 🔄 NumPy Interoperability
-
-Transfer tensors back to Python using
-
-```python
-tensor.to_numpy()
-```
-
-This explicitly copies data from the tensor engine into NumPy memory.
-
-GPU tensors remain in VRAM until this function is called.
-
----
-
-### ⚙ Automatic CPU Fallback
-
-Installation automatically detects CUDA.
-
-If CUDA is unavailable:
-
-- CUDA files are skipped
-- CPU backend is compiled
-- API remains identical
-
-No code changes are required.
-
----
-
-### 🖥 GPU Memory Residency
-
-GPU tensors remain entirely inside GPU memory.
-
-Operations execute without repeatedly transferring data across PCIe.
-
-Data moves back to host memory only when:
-
-```python
-tensor.to_numpy()
-```
-
-is called.
-
----
-
-# Installation
-
-Install directly from PyPI:
+## Installation
 
 ```bash
 pip install aakaar
 ```
 
----
+Prebuilt wheels are available for Windows (Python 3.10–3.14, with CUDA support). On other platforms, `pip` builds Aakaar from source — this requires a C++ compiler (e.g. `g++`) for CPU-only support, and additionally the NVIDIA CUDA Toolkit (`nvcc`) for GPU acceleration. If no CUDA toolkit is found at install time, Aakaar automatically builds a CPU-only extension.
 
-# Requirements
-
-## Windows
-
-Prebuilt wheels are available for
-
-- Python 3.10
-- Python 3.11
-- Python 3.12
-- Python 3.13
-- Python 3.14
-
-CUDA support is included in compatible builds.
-
----
-
-## Linux / macOS
-
-Aakaar builds from source.
-
-Requirements:
-
-- C++ compiler (g++, clang++)
-- Python development headers
-
-Optional:
-
-- NVIDIA CUDA Toolkit
-- nvcc compiler
-
-Without CUDA, installation automatically produces a CPU-only build.
-
----
-
-# Quick Start
-
-## Creating Tensors
+## Quick start: tensors and autograd
 
 ```python
 import aakaar
+import numpy as np
 
-x = aakaar.rand((4,5), seed=42)
+# Load real data
+x = aakaar.from_numpy(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32), requires_grad=True)
 
-print(x)
+# Standard ops, all differentiable
+y = (x * 2 + 1).sum()
+y.backward()
+print(x.grad.to_numpy())  # [[2. 2.] [2. 2.]]
+
+# Zero-copy slicing and views
+big = aakaar.rand((10, 10), device="cpu")
+view = big[1:5, 1:5]
+print(view.is_contiguous())  # False — it's a strided view, no data copied
+
+# Move to GPU
+gpu_tensor = x.to("cuda")
 ```
 
----
-
-## CPU Tensor
+## Training a small neural network
 
 ```python
-cpu = aakaar.rand((4,5), device="cpu")
+import aakaar
+from aakaar.nn import Linear
+from aakaar.optim import SGD
+import numpy as np
+
+# Synthetic data: y = sin(x)
+N = 64
+x_np = np.linspace(-3, 3, N).reshape(N, 1).astype(np.float32)
+y_np = np.sin(x_np).astype(np.float32)
+x = aakaar.from_numpy(x_np)
+y = aakaar.from_numpy(y_np)
+
+fc1 = Linear(1, 16)
+fc2 = Linear(16, 1)
+
+def forward(x):
+    h = fc1(x).tanh()
+    return fc2(h)
+
+def mse_loss(pred, target):
+    diff = pred - target
+    return (diff * diff).sum() / pred.size
+
+params = fc1.parameters() + fc2.parameters()
+opt = SGD(params, lr=0.05)
+
+for epoch in range(300):
+    opt.zero_grad()
+    loss = mse_loss(forward(x), y)
+    loss.backward()
+    opt.step()
+
+print(f"final loss: {loss.item():.6f}")
 ```
 
----
-
-## CUDA Tensor
-
-```python
-gpu = aakaar.rand((4,5), device="cuda")
-```
-
----
-
-## Tensor Properties
-
-```python
-print(x.shape)
-
-print(len(x))
-
-print(x.device)
-
-print(x.ndim)
-
-print(x.size)
-```
-
----
-
-## Accessing Elements
-
-```python
-value = x[0,2]
-```
-
-Returns a Python float.
-
----
-
-## Tensor Slicing
-
-```python
-sub = x[1:3,2:4]
-
-print(sub.shape)
-```
-
-No memory copy occurs.
-
----
-
-## Checking Contiguity
-
-```python
-print(sub.is_contiguous())
-```
-
----
-
-## Convert to NumPy
-
-```python
-numpy_array = sub.to_numpy()
-```
-
----
-
-# Matrix Multiplication
-
-Aakaar performs hardware-accelerated matrix multiplication through **cuBLAS**.
-
-```python
-a = aakaar.rand((1024,1024), device="cuda")
-
-b = aakaar.rand((1024,1024), device="cuda")
-
-c = aakaar.matmul(a,b)
-```
-
-The computation stays entirely on the GPU.
-
-Move results back to Python only when needed:
-
-```python
-result = c.to_numpy()
-```
-
----
-
-# Random Number Generation
-
-Random tensors are generated using **cuRAND** on CUDA builds.
-
-```python
-x = aakaar.rand((512,512), device="cuda")
-```
-
-CPU builds use the native C++ backend.
-
----
-
-# Architecture
-
-Aakaar follows a layered architecture designed for minimal overhead.
-
-```
-Python API
-      │
-      ▼
-pybind11 Bindings
-      │
-      ▼
-Custom C++ Tensor Engine
-      │
- ┌────┴─────┐
- │          │
-CPU Backend CUDA Backend
- │          │
- │       cuBLAS
- │       cuRAND
- │
-Memory Manager
-```
-
-Python serves only as the interface.
-
-Tensor metadata, indexing, slicing, memory management, and mathematical operations are executed entirely in compiled C++ or CUDA.
-
----
-
-# Memory Model
-
-Every tensor stores:
-
-- Pointer to data
-- Shape
-- Strides
-- Storage offset
-- Device information
-- Data type
-
-Tensor views reuse the same underlying storage.
-
-Only metadata changes during slicing.
-
----
-
-# Performance Philosophy
-
-Aakaar minimizes unnecessary memory movement.
-
-Typical workflow:
-
-```
-Python
-
-↓
-
-Create Tensor
-
-↓
-
-GPU Memory
-
-↓
-
-Multiple CUDA Operations
-
-↓
-
-Matrix Multiplication
-
-↓
-
-More CUDA Operations
-
-↓
-
-to_numpy()
-
-↓
-
-Host Memory
-```
-
-The expensive PCIe transfer occurs only when explicitly requested.
-
----
-
-### CUDA Views
-
-Step slicing on CUDA tensors is mathematically correct.
-
-However,
-
-```python
-tensor.to_numpy()
-```
-
-may currently copy the full spanned memory region instead of only the selected elements for highly fragmented strided views.
-
-This optimization is under active development.
-
----
-
-### API Stability
-
-Aakaar is under active development.
-
-Internal APIs may change between minor releases as additional functionality is introduced, including:
-
-- Automatic differentiation (Autograd)
-- Tensor broadcasting
-- Additional mathematical operators
-- Neural network primitives
-- Optimized CUDA kernels
-
----
-
-# Roadmap
-
-Planned features include:
-
-- Automatic differentiation
-- Broadcasting
-- Tensor arithmetic operators
-- Convolution kernels
-- Reduction operations
-- Activation functions
-- Optimizers
-- Neural network layers
-- Mixed precision support
-- CUDA graph execution
-- Multi-GPU support
-
----
-
-# Why Aakaar?
-
-Aakaar was created to demonstrate how modern tensor libraries work internally while remaining lightweight enough to study, modify, and extend.
-
-Instead of hiding the implementation behind millions of lines of code, Aakaar focuses on providing a clean architecture where developers can understand:
-
-- Tensor memory layout
-- GPU execution
-- CUDA programming
-- Shape and stride mechanics
-- pybind11 integration
-- High-performance numerical computing
-
-It is both a usable tensor engine and a learning resource for developers interested in building AI infrastructure from the ground up.
-
----
-
-# License
-
-This project is released under the MIT License.
+## Notes and known limitations
+
+* `matmul` requires contiguous tensors; call `.contiguous()` on sliced/transposed operands first.
+* Elementwise CUDA kernels also require contiguous inputs for their fast vectorized path.
+* `matmul` backward supports broadcasting batch dimensions, but not yet arbitrary mixed-rank batch shapes beyond standard right-aligned broadcasting rules.
+* Only `float32` is currently supported. Support for additional dtypes (float16, float64, int types) is a planned future addition, not yet implemented.
+* This is an actively developed project; APIs may change between minor versions.
