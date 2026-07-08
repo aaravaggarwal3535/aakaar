@@ -1,0 +1,41 @@
+name: Build Windows Wheels
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: # Allows manual triggering from the GitHub UI
+
+jobs:
+  build_windows_wheels:
+    name: Build wheels on Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 1. Install CUDA directly onto the Windows Runner before building.
+      # This automatically adds 'nvcc' to the system PATH.
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v2.5.0
+        with:
+          cuda: '12.4.0' # Matches the version we used on Linux
+
+      # 2. Build the Windows wheels
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.1.0
+        with:
+          output-dir: dist
+        env:
+          # Target exactly Python 3.10, 3.11, 3.12, and 3.14 for 64-bit Windows
+          CIBW_BUILD: "cp310-win_amd64 cp311-win_amd64 cp312-win_amd64 cp314-win_amd64"
+          
+          # No Docker image settings are needed here because it runs on the host!
+
+      # 3. Upload the finished .whl files
+      - name: Upload wheels as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-cuda-wheels
+          path: ./dist/*.whl
