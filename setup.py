@@ -61,23 +61,35 @@ class CUDABuildExtension(build_ext):
         super().build_extensions()
 
 host_compiler_flags = ["/std:c++17"] if sys.platform == "win32" else ["-std=c++17"]
+if sys.platform == "win32":
+    host_compiler_flags = {
+        # Host C++ compiler (MSVC on Windows)
+        "cxx": ["/O2", "/std:c++17", "/EHsc"],
+        # CUDA compiler (NVCC on Windows)
+        "nvcc": ["-O3", "--std=c++17", "-Xcompiler", "/EHsc", "--use_fast_math"]
+    }
+else:
+    # Linux host and target flags (GCC)
+    host_compiler_flags = {
+        # Host C++ compiler (GCC/Clang on Linux)
+        "cxx": ["-O3", "-Wall", "-std=c++17", "-fPIC"],
+        # CUDA compiler (NVCC on Linux)
+        "nvcc": ["-O3", "--std=c++17", "-Xcompiler", "-fPIC", "--use_fast_math"]
+    }
+
+# Now your extension module block can stay exactly the same:
 aakaar_ext = Extension(
     "aakaar._C",
-    sources=["src/bindings.cpp", "src/cpu_kernel.cpp", "src/random_kernel.cu", 'src/matmul_kernel.cu', 'src/elementwise_kernel.cu', 'src/reduction_kernel.cu'],
+    sources=[
+        "src/bindings.cpp", 
+        "src/cpu_kernel.cpp", 
+        "src/random_kernel.cu", 
+        "src/matmul_kernel.cu", 
+        "src/elementwise_kernel.cu", 
+        "src/reduction_kernel.cu"
+    ],
     include_dirs=[pybind11.get_include()],
     libraries=[],  # populated conditionally above
     language="c++",
-    extra_compile_args=host_compiler_flags
-)
-
-setup(
-    name="aakaar",
-    version="0.1.8",
-    author="Aarav Aggarwal",
-    description="A custom standalone ML library featuring CUDA-accelerated operations (CPU fallback supported).",
-    packages=["aakaar"],
-    ext_modules=[aakaar_ext],
-    cmdclass={"build_ext": CUDABuildExtension},
-    install_requires=["numpy"],  # nvidia-* deps now conditional, see below
-    setup_requires=["pybind11"],
+    extra_compile_args=host_compiler_flags  # Divides flags by compiler type cleanly
 )
