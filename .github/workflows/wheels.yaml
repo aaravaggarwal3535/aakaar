@@ -1,13 +1,13 @@
-name: Build Wheels
+name: Build Linux Wheels
 
 on:
   push:
     tags:
-      - 'v*' # Triggers only when you push a version tag like v1.0.0
+      - 'v*'
 
 jobs:
-  build_wheels:
-    name: Build wheels on ubuntu-latest
+  build_linux_wheels:
+    name: Build wheels on Ubuntu
     runs-on: ubuntu-latest
 
     steps:
@@ -19,13 +19,13 @@ jobs:
         with:
           output-dir: dist
         env:
-          # Target your specific Python versions for standard 64-bit Linux
+          # 1. Target exactly Python 3.10, 3.11, 3.12, and 3.14
           CIBW_BUILD: "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp314-manylinux_x86_64"
           
-          # Tell cibuildwheel to use the modern manylinux_2_28 image (AlmaLinux 8)
+          # 2. Use the AlmaLinux 8 container (supports modern CUDA)
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           
-          # Install CUDA Toolkit 12.4 inside the container before compiling
+          # 3. Inject CUDA 12.4 before compiling your C++ code
           CIBW_BEFORE_ALL_LINUX: >
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
             dnf clean all &&
@@ -34,5 +34,5 @@ jobs:
       - name: Upload wheels as artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cibw-wheels
+          name: linux-cuda-wheels
           path: ./dist/*.whl
