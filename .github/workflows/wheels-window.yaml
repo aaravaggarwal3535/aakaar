@@ -17,10 +17,11 @@ jobs:
 
       # 1. Install CUDA directly onto the Windows Runner before building.
       # This automatically adds 'nvcc' to the system PATH.
+      # 1. Install CUDA directly onto the Windows Runner before building.
       - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v2.5.0
+        uses: Jimver/cuda-toolkit@v0.2.35  # <-- Updated version here
         with:
-          cuda: '12.4.0' # Matches the version we used on Linux
+          cuda: '12.4.0'
 
       # 2. Build the Windows wheels
       - name: Build wheels
