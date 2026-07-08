@@ -290,3 +290,93 @@ std::shared_ptr<Tensor> run_cpu_tanh_backward(std::shared_ptr<Tensor> grad_out, 
     }
     return result;
 }
+std::shared_ptr<Tensor> run_cpu_leaky_relu(std::shared_ptr<Tensor> a, float slope) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) {
+        float v = a->get_scalar_flat(i);
+        result->data_ptr[i] = v > 0.0f ? v : v * slope;
+    }
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_leaky_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, float slope) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
+    for (int i = 0; i < input->size; ++i) {
+        float x = input->get_scalar_flat(i);
+        result->data_ptr[i] = x > 0.0f ? grad_out->data_ptr[i] : grad_out->data_ptr[i] * slope;
+    }
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_exp(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = std::exp(a->get_scalar_flat(i));
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_exp_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> exp_output) {
+    auto result = std::make_shared<Tensor>(exp_output->shape, std::string("cpu"));
+    for (int i = 0; i < exp_output->size; ++i) result->data_ptr[i] = grad_out->data_ptr[i] * exp_output->data_ptr[i];
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_log(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = std::log(a->get_scalar_flat(i));
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_log_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
+    for (int i = 0; i < input->size; ++i) result->data_ptr[i] = grad_out->data_ptr[i] / input->get_scalar_flat(i);
+    return result;
+}
+std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
+    if (!a->is_contiguous())
+        throw std::invalid_argument("max() requires a contiguous tensor. Call .contiguous() first.");
+
+    int ndim = (int)a->shape.size();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) throw std::out_of_range("max() dim out of range");
+
+    int outer_size = 1, inner_size = 1;
+    for (int i = 0; i < dim; ++i) outer_size *= a->shape[i];
+    for (int i = dim + 1; i < ndim; ++i) inner_size *= a->shape[i];
+    int reduce_size = a->shape[dim];
+
+    std::vector<int> out_shape;
+    for (int i = 0; i < ndim; ++i) {
+        if (i == dim) { if (keepdim) out_shape.push_back(1); }
+        else out_shape.push_back(a->shape[i]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    auto result = std::make_shared<Tensor>(out_shape, std::string("cpu"));
+    std::vector<int> argmax(outer_size * inner_size);
+
+    for (int o = 0; o < outer_size; ++o) {
+        for (int i = 0; i < inner_size; ++i) {
+            float best = a->data_ptr[(o * reduce_size + 0) * inner_size + i];
+            int best_r = 0;
+            for (int r = 1; r < reduce_size; ++r) {
+                float v = a->data_ptr[(o * reduce_size + r) * inner_size + i];
+                if (v > best) { best = v; best_r = r; }
+            }
+            result->data_ptr[o * inner_size + i] = best;
+            argmax[o * inner_size + i] = best_r;
+        }
+    }
+    return {result, argmax};
+}
+
+std::shared_ptr<Tensor> run_cpu_max_axis_backward(std::shared_ptr<Tensor> grad_out, const std::vector<int>& argmax,
+                                                   std::vector<int> orig_shape, int dim, int reduce_size, int inner_size) {
+    auto grad_in = std::make_shared<Tensor>(orig_shape, std::string("cpu"));
+    grad_in->fill_zero();
+
+    int out_size = (int)argmax.size();
+    int outer_size = out_size / inner_size;
+    for (int o = 0; o < outer_size; ++o) {
+        for (int i = 0; i < inner_size; ++i) {
+            int idx = o * inner_size + i;
+            int r = argmax[idx];
+            grad_in->data_ptr[(o * reduce_size + r) * inner_size + i] = grad_out->data_ptr[idx];
+        }
+    }
+    return grad_in;
+}

@@ -574,3 +574,328 @@ std::shared_ptr<Tensor> run_cuda_tanh_backward(std::shared_ptr<Tensor> grad_out,
     cudaDeviceSynchronize();
     return result;
 }
+
+// ---------------------------------------------------------------------------
+// LEAKY RELU
+// Same optimization approach as relu: __ldg() global memory caching (already
+// present), float4 vectorization with runtime 16-byte alignment guard (views/
+// slices are NOT guaranteed float4-aligned even when "contiguous" in the
+// stride sense — see is_aligned16/elem_blocks defined earlier in this file),
+// scalar fallback serving both the "unaligned" and "tail" cases.
+// ---------------------------------------------------------------------------
+
+__global__ void leaky_relu_forward_scalar_kernel(const float* __restrict__ in, float* __restrict__ out,
+                                                  float slope, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float v = __ldg(&in[i]);
+        out[i] = v > 0.0f ? v : v * slope;
+    }
+}
+
+__global__ void leaky_relu_forward_vec4_kernel(const float4* __restrict__ in, float4* __restrict__ out,
+                                                float slope, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 v = __ldg(&in[i]);
+        float4 r;
+        r.x = v.x > 0.0f ? v.x : v.x * slope;
+        r.y = v.y > 0.0f ? v.y : v.y * slope;
+        r.z = v.z > 0.0f ? v.z : v.z * slope;
+        r.w = v.w > 0.0f ? v.w : v.w * slope;
+        out[i] = r;
+    }
+}
+
+__global__ void leaky_relu_backward_scalar_kernel(const float* __restrict__ grad_out, const float* __restrict__ in,
+                                                   float* __restrict__ grad_in, float slope, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float x = __ldg(&in[i]);
+        float g = __ldg(&grad_out[i]);
+        grad_in[i] = x > 0.0f ? g : g * slope;
+    }
+}
+
+__global__ void leaky_relu_backward_vec4_kernel(const float4* __restrict__ grad_out, const float4* __restrict__ in,
+                                                 float4* __restrict__ grad_in, float slope, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 x = __ldg(&in[i]);
+        float4 g = __ldg(&grad_out[i]);
+        float4 r;
+        r.x = x.x > 0.0f ? g.x : g.x * slope;
+        r.y = x.y > 0.0f ? g.y : g.y * slope;
+        r.z = x.z > 0.0f ? g.z : g.z * slope;
+        r.w = x.w > 0.0f ? g.w : g.w * slope;
+        grad_in[i] = r;
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_leaky_relu(std::shared_ptr<Tensor> a, float slope) {
+    if (!a->is_contiguous()) throw std::invalid_argument("leaky_relu requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
+    int n = a->size;
+    if (n == 0) return result;
+
+    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        leaky_relu_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(a->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), slope, n4);
+        if (tail > 0) {
+            leaky_relu_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, slope, tail);
+        }
+    } else {
+        leaky_relu_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, slope, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_leaky_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, float slope) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cuda"));
+    int n = input->size;
+    if (n == 0) return result;
+
+    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
+                            && is_aligned16(input->data_ptr)
+                            && is_aligned16(result->data_ptr);
+
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        leaky_relu_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(grad_out->data_ptr),
+            reinterpret_cast<const float4*>(input->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), slope, n4);
+        if (tail > 0) {
+            leaky_relu_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                grad_out->data_ptr + n4 * 4, input->data_ptr + n4 * 4,
+                result->data_ptr + n4 * 4, slope, tail);
+        }
+    } else {
+        leaky_relu_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
+            grad_out->data_ptr, input->data_ptr, result->data_ptr, slope, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// EXP
+// ---------------------------------------------------------------------------
+
+__global__ void exp_forward_scalar_kernel(const float* __restrict__ in, float* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        out[i] = expf(__ldg(&in[i]));
+    }
+}
+
+__global__ void exp_forward_vec4_kernel(const float4* __restrict__ in, float4* __restrict__ out, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 v = __ldg(&in[i]);
+        float4 r;
+        r.x = expf(v.x);
+        r.y = expf(v.y);
+        r.z = expf(v.z);
+        r.w = expf(v.w);
+        out[i] = r;
+    }
+}
+
+__global__ void exp_backward_scalar_kernel(const float* __restrict__ grad_out, const float* __restrict__ exp_out,
+                                            float* __restrict__ grad_in, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        grad_in[i] = __ldg(&grad_out[i]) * __ldg(&exp_out[i]);
+    }
+}
+
+__global__ void exp_backward_vec4_kernel(const float4* __restrict__ grad_out, const float4* __restrict__ exp_out,
+                                          float4* __restrict__ grad_in, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 g = __ldg(&grad_out[i]);
+        float4 e = __ldg(&exp_out[i]);
+        float4 r;
+        r.x = g.x * e.x;
+        r.y = g.y * e.y;
+        r.z = g.z * e.z;
+        r.w = g.w * e.w;
+        grad_in[i] = r;
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_exp(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) throw std::invalid_argument("exp requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
+    int n = a->size;
+    if (n == 0) return result;
+
+    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        exp_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(a->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), n4);
+        if (tail > 0) {
+            exp_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, tail);
+        }
+    } else {
+        exp_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_exp_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> exp_output) {
+    auto result = std::make_shared<Tensor>(exp_output->shape, std::string("cuda"));
+    int n = exp_output->size;
+    if (n == 0) return result;
+
+    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
+                            && is_aligned16(exp_output->data_ptr)
+                            && is_aligned16(result->data_ptr);
+
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        exp_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(grad_out->data_ptr),
+            reinterpret_cast<const float4*>(exp_output->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), n4);
+        if (tail > 0) {
+            exp_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                grad_out->data_ptr + n4 * 4, exp_output->data_ptr + n4 * 4,
+                result->data_ptr + n4 * 4, tail);
+        }
+    } else {
+        exp_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
+            grad_out->data_ptr, exp_output->data_ptr, result->data_ptr, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// LOG
+// ---------------------------------------------------------------------------
+
+__global__ void log_forward_scalar_kernel(const float* __restrict__ in, float* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        out[i] = logf(__ldg(&in[i]));
+    }
+}
+
+__global__ void log_forward_vec4_kernel(const float4* __restrict__ in, float4* __restrict__ out, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 v = __ldg(&in[i]);
+        float4 r;
+        r.x = logf(v.x);
+        r.y = logf(v.y);
+        r.z = logf(v.z);
+        r.w = logf(v.w);
+        out[i] = r;
+    }
+}
+
+__global__ void log_backward_scalar_kernel(const float* __restrict__ grad_out, const float* __restrict__ in,
+                                            float* __restrict__ grad_in, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        grad_in[i] = __ldg(&grad_out[i]) / __ldg(&in[i]);
+    }
+}
+
+__global__ void log_backward_vec4_kernel(const float4* __restrict__ grad_out, const float4* __restrict__ in,
+                                          float4* __restrict__ grad_in, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 g = __ldg(&grad_out[i]);
+        float4 x = __ldg(&in[i]);
+        float4 r;
+        r.x = g.x / x.x;
+        r.y = g.y / x.y;
+        r.z = g.z / x.z;
+        r.w = g.w / x.w;
+        grad_in[i] = r;
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_log(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) throw std::invalid_argument("log requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
+    int n = a->size;
+    if (n == 0) return result;
+
+    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        log_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(a->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), n4);
+        if (tail > 0) {
+            log_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, tail);
+        }
+    } else {
+        log_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_log_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cuda"));
+    int n = input->size;
+    if (n == 0) return result;
+
+    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
+                            && is_aligned16(input->data_ptr)
+                            && is_aligned16(result->data_ptr);
+
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        log_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(grad_out->data_ptr),
+            reinterpret_cast<const float4*>(input->data_ptr),
+            reinterpret_cast<float4*>(result->data_ptr), n4);
+        if (tail > 0) {
+            log_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
+                grad_out->data_ptr + n4 * 4, input->data_ptr + n4 * 4,
+                result->data_ptr + n4 * 4, tail);
+        }
+    } else {
+        log_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
+            grad_out->data_ptr, input->data_ptr, result->data_ptr, n);
+    }
+    cudaDeviceSynchronize();
+    return result;
+}

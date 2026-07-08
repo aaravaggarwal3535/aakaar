@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "tensor.h"
+#include <utility>
 
 
 namespace py = pybind11;
@@ -31,6 +32,15 @@ std::shared_ptr<Tensor> run_cpu_sigmoid(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_sigmoid_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> sig_output);
 std::shared_ptr<Tensor> run_cpu_tanh(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_tanh_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> tanh_output);
+std::shared_ptr<Tensor> run_cpu_leaky_relu(std::shared_ptr<Tensor> a, float slope);
+std::shared_ptr<Tensor> run_cpu_leaky_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, float slope);
+std::shared_ptr<Tensor> run_cpu_exp(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cpu_exp_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> exp_output);
+std::shared_ptr<Tensor> run_cpu_log(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cpu_log_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
+std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
+std::shared_ptr<Tensor> run_cpu_max_axis_backward(std::shared_ptr<Tensor> grad_out, const std::vector<int>& argmax,
+                                                   std::vector<int> orig_shape, int dim, int reduce_size, int inner_size);
 
 
 #ifndef AAKAAR_NO_CUDA
@@ -54,6 +64,15 @@ std::shared_ptr<Tensor> run_cuda_sigmoid(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_sigmoid_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> sig_output);
 std::shared_ptr<Tensor> run_cuda_tanh(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_tanh_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> tanh_output);
+std::shared_ptr<Tensor> run_cuda_leaky_relu(std::shared_ptr<Tensor> a, float slope);
+std::shared_ptr<Tensor> run_cuda_leaky_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, float slope);
+std::shared_ptr<Tensor> run_cuda_exp(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cuda_exp_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> exp_output);
+std::shared_ptr<Tensor> run_cuda_log(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cuda_log_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
+std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cuda_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
+std::shared_ptr<Tensor> run_cuda_max_axis_backward(std::shared_ptr<Tensor> grad_out, const std::vector<int>& argmax,
+                                                    std::vector<int> orig_shape, int dim, int reduce_size, int inner_size);
 void empty_cache() { CachingAllocator::get_instance().empty_cache(); }
 #endif
 
@@ -72,6 +91,115 @@ static std::shared_ptr<Tensor> dispatch_broadcast_axis(std::shared_ptr<Tensor> a
 static std::shared_ptr<Tensor> dispatch_contiguous(std::shared_ptr<Tensor> a);
 
 // ---- Dispatch implementations ----
+static std::shared_ptr<Tensor> dispatch_leaky_relu(std::shared_ptr<Tensor> a, float slope) {
+    if (!a->is_contiguous()) a = dispatch_contiguous(a);
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_leaky_relu(a, slope);
+    else
+#endif
+    result = run_cpu_leaky_relu(a, slope);
+
+    if (g_grad_enabled && a->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a};
+        node->op_name = "leaky_relu";
+        node->backward_fn = [a, slope](std::shared_ptr<Tensor> grad_out) {
+#ifndef AAKAAR_NO_CUDA
+            if (a->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_leaky_relu_backward(grad_out, a, slope)};
+#endif
+            return std::vector<std::shared_ptr<Tensor>>{run_cpu_leaky_relu_backward(grad_out, a, slope)};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+static std::shared_ptr<Tensor> dispatch_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
+    if (!a->is_contiguous()) a = dispatch_contiguous(a);
+
+    int ndim = (int)a->shape.size();
+    int norm_dim = dim < 0 ? dim + ndim : dim;
+    int reduce_size = a->shape[norm_dim];
+    int inner_size = 1;
+    for (int i = norm_dim + 1; i < ndim; ++i) inner_size *= a->shape[i];
+
+    std::shared_ptr<Tensor> result;
+    std::vector<int> argmax;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") { auto pr = run_cuda_max_axis(a, dim, keepdim); result = pr.first; argmax = pr.second; }
+    else
+#endif
+    { auto pr = run_cpu_max_axis(a, dim, keepdim); result = pr.first; argmax = pr.second; }
+
+    if (g_grad_enabled && a->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a};
+        node->op_name = "max_axis";
+        auto orig_shape = a->shape;
+        auto dev = a->device;
+        node->backward_fn = [argmax, orig_shape, norm_dim, reduce_size, inner_size, dev]
+                             (std::shared_ptr<Tensor> grad_out) {
+#ifndef AAKAAR_NO_CUDA
+            if (dev == "cuda") return std::vector<std::shared_ptr<Tensor>>{
+                run_cuda_max_axis_backward(grad_out, argmax, orig_shape, norm_dim, reduce_size, inner_size)};
+#endif
+            return std::vector<std::shared_ptr<Tensor>>{
+                run_cpu_max_axis_backward(grad_out, argmax, orig_shape, norm_dim, reduce_size, inner_size)};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+static std::shared_ptr<Tensor> dispatch_exp(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) a = dispatch_contiguous(a);
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_exp(a);
+    else
+#endif
+    result = run_cpu_exp(a);
+    if (g_grad_enabled && a->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a};
+        node->op_name = "exp";
+        auto output_copy = result;
+        node->backward_fn = [output_copy](std::shared_ptr<Tensor> grad_out) {
+#ifndef AAKAAR_NO_CUDA
+            if (output_copy->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_exp_backward(grad_out, output_copy)};
+#endif
+            return std::vector<std::shared_ptr<Tensor>>{run_cpu_exp_backward(grad_out, output_copy)};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_log(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) a = dispatch_contiguous(a);
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_log(a);
+    else
+#endif
+    result = run_cpu_log(a);
+    if (g_grad_enabled && a->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a};
+        node->op_name = "log";
+        node->backward_fn = [a](std::shared_ptr<Tensor> grad_out) {
+#ifndef AAKAAR_NO_CUDA
+            if (a->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_log_backward(grad_out, a)};
+#endif
+            return std::vector<std::shared_ptr<Tensor>>{run_cpu_log_backward(grad_out, a)};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
 
 static std::shared_ptr<Tensor> dispatch_add_scalar(std::shared_ptr<Tensor> a, float s) {
     std::shared_ptr<Tensor> result;
@@ -614,6 +742,11 @@ PYBIND11_MODULE(_C, m) {
         .def("sigmoid", [](std::shared_ptr<Tensor> self) { return dispatch_sigmoid(self); })
         .def("tanh", [](std::shared_ptr<Tensor> self) { return dispatch_tanh(self); })
         .def("copy_", &Tensor::copy_)
+        .def("leaky_relu", [](std::shared_ptr<Tensor> self, float slope) { return dispatch_leaky_relu(self, slope); }, py::arg("slope") = 0.01f)
+        .def("max", [](std::shared_ptr<Tensor> self, int dim, bool keepdim) {
+            return dispatch_max_axis(self, dim, keepdim);
+        }, py::arg("dim"), py::arg("keepdim") = false)
+        .def("__neg__", [](std::shared_ptr<Tensor> a) { return dispatch_mul_scalar(a, -1.0f); })
         .def("contiguous", [](std::shared_ptr<Tensor> self) { return dispatch_contiguous(self); })
 .def("to", [](std::shared_ptr<Tensor> self, std::string target_device) {
     auto result = self->to_device(target_device);
@@ -670,6 +803,8 @@ PYBIND11_MODULE(_C, m) {
         .def("__repr__", &Tensor::repr)
         .def("__str__", &Tensor::repr)
         .def("__len__", [](Tensor &t) { return t.shape.empty() ? 0 : t.shape[0]; })
+        .def("exp", [](std::shared_ptr<Tensor> self) { return dispatch_exp(self); })
+        .def("log", [](std::shared_ptr<Tensor> self) { return dispatch_log(self); })
         .def("view", [](std::shared_ptr<Tensor> self, std::vector<int> new_shape) {
             auto result = self->view(new_shape);
             if (g_grad_enabled && self->requires_grad) {

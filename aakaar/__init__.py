@@ -130,3 +130,13 @@ def zero_grad_all(parameters):
     """Zero the .grad of every tensor in an iterable, e.g. a list of parameters."""
     for p in parameters:
         p.zero_grad()
+def softmax(x, dim=-1):
+    m = x.max(dim=dim, keepdim=True)
+    shifted = x - m
+    exp_x = shifted.exp()
+    return exp_x / exp_x.sum(dim=dim, keepdim=True)
+
+def cross_entropy_from_probs(probs, target_onehot):
+    eps = 1e-7
+    log_probs = (probs + eps).log()
+    return -(target_onehot * log_probs).sum() / probs.shape[0]
