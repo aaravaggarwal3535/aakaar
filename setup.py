@@ -17,6 +17,17 @@ print(f"CUDA toolkit detected: {CUDA_AVAILABLE}")
 class CUDABuildExtension(build_ext):
     def build_extensions(self):
         is_windows = sys.platform == "win32"
+        if is_windows:
+            openblas_root = os.environ.get("OPENBLAS_ROOT", r"C:\openblas-prebuilt")
+            openblas_include = os.path.join(openblas_root, "include")
+            openblas_lib_dir = os.path.join(openblas_root, "lib")
+            if os.path.isfile(os.path.join(openblas_include, "cblas.h")):
+                for ext in self.extensions:
+                    ext.include_dirs.append(openblas_include)
+                    ext.library_dirs.append(openblas_lib_dir)
+                    ext.libraries.append("libopenblas")
+            else:
+                print("WARNING: OpenBLAS cblas.h not found at", openblas_include)
 
         if CUDA_AVAILABLE:
             cuda_home = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME") or "/usr/local/cuda"
@@ -72,10 +83,12 @@ aakaar_ext = Extension(
 
 setup(
     name="aakaar",
-    version="0.1.8",
+    version="0.1.9",
     author="Aarav Aggarwal",
     description="A custom standalone ML library featuring CUDA-accelerated operations (CPU fallback supported).",
     packages=["aakaar"],
+    package_data={"aakaar": ["_openblas_bin/*.dll"]},
+    include_package_data=True,
     ext_modules=[aakaar_ext],
     cmdclass={"build_ext": CUDABuildExtension},
     install_requires=["numpy"],  # nvidia-* deps now conditional, see below

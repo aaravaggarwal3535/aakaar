@@ -4,6 +4,14 @@
 #include <stdexcept>
 #include "tensor.h"
 #include <omp.h>
+#include <cblas.h>
+
+extern "C" char* openblas_get_config(void);
+extern "C" char* openblas_get_corename(void);
+
+std::string get_openblas_diagnostic() {
+    return std::string("Config: ") + openblas_get_config() + " | Core: " + openblas_get_corename();
+}
 
 void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed) {
     std::mt19937 gen(seed);
@@ -80,12 +88,13 @@ std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_pt
         const float* ap = a->data_ptr + compute_offset(bi, a->shape, M*K);
         const float* bp = b->data_ptr + compute_offset(bi, b->shape, K*N);
         float* cp = result->data_ptr + bi * M * N;
-        for (int i = 0; i < M; ++i)
-            for (int j = 0; j < N; ++j) {
-                float sum = 0.0f;
-                for (int k = 0; k < K; ++k) sum += ap[i*K+k] * bp[k*N+j];
-                cp[i*N+j] = sum;
-            }
+
+        // Row-major C = A * B, single BLAS call replaces the old triple-nested loop.
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    M, N, K,
+                    1.0f, ap, K,
+                    bp, N,
+                    0.0f, cp, N);
     }
     return result;
 }
@@ -121,8 +130,10 @@ static std::shared_ptr<Tensor> run_cpu_broadcast_elementwise(std::shared_ptr<Ten
 std::shared_ptr<Tensor> run_cpu_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
     if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x+y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) {
-        result->data_ptr[i] = a->get_scalar_flat(i) + b->get_scalar_flat(i);
+    if (a->is_contiguous() && b->is_contiguous()) {
+        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->data_ptr[i] + b->data_ptr[i];
+    } else {
+        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) + b->get_scalar_flat(i);
     }
     return result;
 }
@@ -130,8 +141,10 @@ std::shared_ptr<Tensor> run_cpu_add(std::shared_ptr<Tensor> a, std::shared_ptr<T
 std::shared_ptr<Tensor> run_cpu_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
     if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x-y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) {
-        result->data_ptr[i] = a->get_scalar_flat(i) - b->get_scalar_flat(i);
+    if (a->is_contiguous() && b->is_contiguous()) {
+        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->data_ptr[i] - b->data_ptr[i];
+    } else {
+        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) - b->get_scalar_flat(i);
     }
     return result;
 }
@@ -139,14 +152,22 @@ std::shared_ptr<Tensor> run_cpu_sub(std::shared_ptr<Tensor> a, std::shared_ptr<T
 std::shared_ptr<Tensor> run_cpu_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
     if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x*y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) * b->get_scalar_flat(i);
+    if (a->is_contiguous() && b->is_contiguous()) {
+        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->data_ptr[i] * b->data_ptr[i];
+    } else {
+        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) * b->get_scalar_flat(i);
+    }
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
     if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x/y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) / b->get_scalar_flat(i);
+    if (a->is_contiguous() && b->is_contiguous()) {
+        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->data_ptr[i] / b->data_ptr[i];
+    } else {
+        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) / b->get_scalar_flat(i);
+    }
     return result;
 }
 

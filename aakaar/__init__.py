@@ -2,7 +2,7 @@ import os
 import sys
 import contextlib
 
-__version__ = "0.1.8"
+__version__ = "0.1.9"
 
 def _add_windows_cuda_dll_dirs():
     if sys.platform != "win32":
@@ -13,21 +13,30 @@ def _add_windows_cuda_dll_dirs():
         nvidia_root = os.path.join(root, "nvidia")
         if not os.path.isdir(nvidia_root):
             continue
-
-        # New unversioned CUDA-13+ packages: consolidated nvidia/cuXX/bin/x86_64/
         for entry in os.listdir(nvidia_root):
             if entry.startswith("cu") and entry[2:].isdigit():
                 consolidated_bin = os.path.join(nvidia_root, entry, "bin", "x86_64")
                 if os.path.isdir(consolidated_bin):
                     os.add_dll_directory(consolidated_bin)
-
-        # Old per-package CUDA-12 style: nvidia/<pkg>/bin/
         for pkg in ("cuda_runtime", "curand", "cublas", "cuda_nvrtc"):
             bin_dir = os.path.join(nvidia_root, pkg, "bin")
             if os.path.isdir(bin_dir):
                 os.add_dll_directory(bin_dir)
 
+def _add_windows_openblas_dll_dir():
+    if sys.platform != "win32":
+        return
+    bundled_bin = os.path.join(os.path.dirname(__file__), "_openblas_bin")
+    if os.path.isdir(bundled_bin):
+        os.add_dll_directory(bundled_bin)
+        return
+    # Fallback for local development before the DLL is bundled/reinstalled
+    dev_bin = os.environ.get("AAKAAR_OPENBLAS_BIN", r"C:\openblas-prebuilt\bin")
+    if os.path.isdir(dev_bin):
+        os.add_dll_directory(dev_bin)
+
 _add_windows_cuda_dll_dirs()
+_add_windows_openblas_dll_dir()
 
 from . import _C
 import numpy as np

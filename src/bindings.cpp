@@ -41,6 +41,7 @@ std::shared_ptr<Tensor> run_cpu_log_backward(std::shared_ptr<Tensor> grad_out, s
 std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
 std::shared_ptr<Tensor> run_cpu_max_axis_backward(std::shared_ptr<Tensor> grad_out, const std::vector<int>& argmax,
                                                    std::vector<int> orig_shape, int dim, int reduce_size, int inner_size);
+std::string get_openblas_diagnostic();
 
 
 #ifndef AAKAAR_NO_CUDA
@@ -975,6 +976,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("from_numpy", &tensor_from_numpy,
           py::arg("array"), py::arg("device") = "cpu", py::arg("requires_grad") = false,
           "Create a Tensor from an existing numpy array, copying its data.");
+    m.def("_openblas_diagnostic", &get_openblas_diagnostic);
 
 #ifndef AAKAAR_NO_CUDA
     m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");
