@@ -56,7 +56,6 @@ std::shared_ptr<Tensor> run_cuda_sum_axis(std::shared_ptr<Tensor> a, int dim, bo
     );
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -107,7 +106,6 @@ std::shared_ptr<Tensor> run_cuda_broadcast_axis(std::shared_ptr<Tensor> a, int d
     broadcast_axis_kernel<<<blocks, threads>>>(a->data_ptr, result->data_ptr, out_size, target_size, 0, inner_size);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
-    cudaDeviceSynchronize();
     return result;
 }
 // Append to reduction_kernel.cu
@@ -183,7 +181,6 @@ std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cuda_max_axis(std::shar
                                           out_size, reduce_size, inner_size * reduce_size, inner_size);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) { cudaFree(d_argmax); throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err)); }
-    cudaDeviceSynchronize();
 
     std::vector<int> h_argmax(out_size);
     cudaMemcpy(h_argmax.data(), d_argmax, out_size * sizeof(int), cudaMemcpyDeviceToHost);
@@ -207,6 +204,5 @@ std::shared_ptr<Tensor> run_cuda_max_axis_backward(std::shared_ptr<Tensor> grad_
     max_axis_backward_kernel<<<blocks, threads>>>(grad_out->data_ptr, d_argmax, grad_in->data_ptr,
                                                     out_size, reduce_size, inner_size);
     cudaFree(d_argmax);
-    cudaDeviceSynchronize();
     return grad_in;
 }

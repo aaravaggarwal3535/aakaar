@@ -74,7 +74,7 @@ class CUDABuildExtension(build_ext):
 host_compiler_flags = ["/std:c++17"] if sys.platform == "win32" else ["-std=c++17"]
 aakaar_ext = Extension(
     "aakaar._C",
-    sources=["src/bindings.cpp", "src/cpu_kernel.cpp", "src/random_kernel.cu", 'src/matmul_kernel.cu', 'src/elementwise_kernel.cu', 'src/reduction_kernel.cu'],
+    sources=["src/bindings.cpp", "src/cpu_kernel.cpp", "src/random_kernel.cu", 'src/matmul_kernel.cu', 'src/elementwise_kernel.cu', 'src/reduction_kernel.cu', 'src/strided_copy_kernel.cu'],
     include_dirs=[pybind11.get_include()],
     libraries=[],  # populated conditionally above
     language="c++",
@@ -86,7 +86,7 @@ setup(
     version="0.1.9",
     author="Aarav Aggarwal",
     description="A custom standalone ML library featuring CUDA-accelerated operations (CPU fallback supported).",
-    packages=["aakaar"],
+    packages=["aakaar", "aakaar._openblas_bin"],
     package_data={"aakaar": ["_openblas_bin/*.dll"]},
     include_package_data=True,
     ext_modules=[aakaar_ext],

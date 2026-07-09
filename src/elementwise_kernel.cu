@@ -101,7 +101,6 @@ static std::shared_ptr<Tensor> run_cuda_broadcast_elementwise(std::shared_ptr<Te
     cudaError_t err = cudaGetLastError();
     cudaFree(d_out_shape); cudaFree(d_a_shape); cudaFree(d_a_strides); cudaFree(d_b_shape); cudaFree(d_b_strides);
     if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -215,7 +214,6 @@ static std::shared_ptr<Tensor> run_cuda_elementwise(std::shared_ptr<Tensor> a, s
     vector_elementwise_vectorized<OP><<<compute_blocks(n), 256>>>(a->data_ptr, b->data_ptr, result->data_ptr, n);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -227,7 +225,6 @@ static std::shared_ptr<Tensor> run_cuda_scalar(std::shared_ptr<Tensor> a, float 
     scalar_elementwise_vectorized<OP><<<compute_blocks(n), 256>>>(a->data_ptr, scalar, result->data_ptr, n);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -337,7 +334,6 @@ std::shared_ptr<Tensor> run_cuda_relu(std::shared_ptr<Tensor> a) {
     } else {
         relu_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -364,7 +360,6 @@ std::shared_ptr<Tensor> run_cuda_relu_backward(std::shared_ptr<Tensor> grad_out,
         relu_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
             grad_out->data_ptr, input->data_ptr, result->data_ptr, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -441,7 +436,6 @@ std::shared_ptr<Tensor> run_cuda_sigmoid(std::shared_ptr<Tensor> a) {
     } else {
         sigmoid_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -468,7 +462,6 @@ std::shared_ptr<Tensor> run_cuda_sigmoid_backward(std::shared_ptr<Tensor> grad_o
         sigmoid_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
             grad_out->data_ptr, sig_output->data_ptr, result->data_ptr, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -544,7 +537,6 @@ std::shared_ptr<Tensor> run_cuda_tanh(std::shared_ptr<Tensor> a) {
     } else {
         tanh_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -571,7 +563,6 @@ std::shared_ptr<Tensor> run_cuda_tanh_backward(std::shared_ptr<Tensor> grad_out,
         tanh_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
             grad_out->data_ptr, tanh_output->data_ptr, result->data_ptr, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -657,7 +648,6 @@ std::shared_ptr<Tensor> run_cuda_leaky_relu(std::shared_ptr<Tensor> a, float slo
     } else {
         leaky_relu_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, slope, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -686,7 +676,6 @@ std::shared_ptr<Tensor> run_cuda_leaky_relu_backward(std::shared_ptr<Tensor> gra
         leaky_relu_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
             grad_out->data_ptr, input->data_ptr, result->data_ptr, slope, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -762,7 +751,6 @@ std::shared_ptr<Tensor> run_cuda_exp(std::shared_ptr<Tensor> a) {
     } else {
         exp_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -791,7 +779,6 @@ std::shared_ptr<Tensor> run_cuda_exp_backward(std::shared_ptr<Tensor> grad_out, 
         exp_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
             grad_out->data_ptr, exp_output->data_ptr, result->data_ptr, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -867,7 +854,6 @@ std::shared_ptr<Tensor> run_cuda_log(std::shared_ptr<Tensor> a) {
     } else {
         log_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }
 
@@ -896,6 +882,5 @@ std::shared_ptr<Tensor> run_cuda_log_backward(std::shared_ptr<Tensor> grad_out, 
         log_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
             grad_out->data_ptr, input->data_ptr, result->data_ptr, n);
     }
-    cudaDeviceSynchronize();
     return result;
 }

@@ -15,5 +15,4 @@ void run_curand_uniform(std::shared_ptr<Tensor> t, unsigned long long seed) {
     }
 
     // Ensure the GPU finishes execution before returning control to Python
-    cudaDeviceSynchronize();
 }

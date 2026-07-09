@@ -116,6 +116,5 @@ std::shared_ptr<Tensor> run_cublas_matmul(std::shared_ptr<Tensor> a, std::shared
         if (status != CUBLAS_STATUS_SUCCESS)
             throw std::runtime_error("cuBLAS SGEMM failed at batch index " + std::to_string(bi));
     }
-    cudaDeviceSynchronize();
     return result;
 }

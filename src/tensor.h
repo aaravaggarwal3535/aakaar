@@ -204,32 +204,49 @@ std::shared_ptr<Tensor> reshape(std::vector<int> new_shape) {
 }
 
     std::shared_ptr<Tensor> contiguous() {
-        if (is_contiguous()) {
-            return shared_from_this();  // already contiguous, return self reference
-        }
-        auto result = std::make_shared<Tensor>(shape, device);
-        std::vector<int> idx(shape.size(), 0);
-        for (int flat = 0; flat < size; ++flat) {
-            float val = get_scalar(idx);
-            if (device == "cuda") {
+    if (is_contiguous()) {
+        return shared_from_this();
+    }
+    auto result = std::make_shared<Tensor>(shape, device);
+
 #ifndef AAKAAR_NO_CUDA
-                cudaMemcpy(result->data_ptr + flat, &val, sizeof(float), cudaMemcpyHostToDevice);
-#endif
-            } else {
-                result->data_ptr[flat] = val;
-            }
-            for (int d = (int)shape.size() - 1; d >= 0; --d) {
-                if (++idx[d] < shape[d]) break;
-                idx[d] = 0;
-            }
-        }
+    if (device == "cuda") {
+        extern void run_cuda_strided_gather(const float*, float*, const std::vector<int>&,
+                                             const std::vector<int>&, int);
+        run_cuda_strided_gather(data_ptr, result->data_ptr, shape, strides, size);
         return result;
     }
+#endif
+
+    // CPU path: direct pointer walk, no cudaMemcpy overhead to worry about
+    std::vector<int> idx(shape.size(), 0);
+    for (int flat = 0; flat < size; ++flat) {
+        result->data_ptr[flat] = get_scalar(idx);
+        for (int d = (int)shape.size() - 1; d >= 0; --d) {
+            if (++idx[d] < shape[d]) break;
+            idx[d] = 0;
+        }
+    }
+    return result;
+}
 
 void copy_(std::shared_ptr<Tensor> other) {
     if (shape != other->shape)
         throw std::invalid_argument("copy_(): shape mismatch, self=" + shape_str() +
                                      " other=" + other->shape_str());
+
+    if (is_contiguous() && other->is_contiguous() && device == other->device) {
+#ifndef AAKAAR_NO_CUDA
+        if (device == "cuda") {
+            cudaMemcpy(data_ptr, other->data_ptr, size * sizeof(float), cudaMemcpyDeviceToDevice);
+            return;
+        }
+#endif
+        std::memcpy(data_ptr, other->data_ptr, size * sizeof(float));
+        return;
+    }
+
+    // Slow strided fallback: mismatched contiguity/device, or a genuine strided view.
     std::vector<int> idx(shape.size(), 0);
     for (int flat = 0; flat < size; ++flat) {
         float v = other->get_scalar(idx);
