@@ -3,16 +3,34 @@
 #include <stdexcept>
 #include "tensor.h"
 
+#include <cuda_runtime.h>
+#include <memory>
+#include <stdexcept>
+#include <vector>
+#include "tensor.h"
+
+// Assuming MAX_DIMS is already defined (e.g., #define MAX_DIMS 8)
+#ifndef MAX_DIMS
+#define MAX_DIMS 8
+#endif
+
 enum class ElementwiseOp { ADD, SUB, MUL, DIV };
 
+// Struct to pass broadcast dimensions and strides by value
+struct BroadcastShapeInfo {
+    int out_shape[MAX_DIMS];
+    int a_shape[MAX_DIMS];
+    int a_strides[MAX_DIMS];
+    int b_shape[MAX_DIMS];
+    int b_strides[MAX_DIMS];
+    int ndim;
+};
+
 // ---- Tensor op Tensor ----
-// Add these broadcast-aware kernels alongside your existing vectorized ones.
-// Non-vectorized (no float4) since broadcast index math varies per-element;
-// correctness-first, can optimize later if profiling shows this matters.
 
 __device__ __forceinline__ int broadcast_index(int out_idx, const int* out_shape,
-                                                 const int* in_strides, const int* in_shape,
-                                                 int ndim) {
+                                               const int* in_strides, const int* in_shape,
+                                               int ndim) {
     int idx = 0;
     int remaining = out_idx;
     for (int d = ndim - 1; d >= 0; --d) {
@@ -25,15 +43,16 @@ __device__ __forceinline__ int broadcast_index(int out_idx, const int* out_shape
 }
 
 template <ElementwiseOp OP>
-__global__ void broadcast_elementwise_kernel(const float* __restrict__ a, const int* a_shape, const int* a_strides,
-                                              const float* __restrict__ b, const int* b_shape, const int* b_strides,
-                                              float* __restrict__ c, const int* out_shape,
-                                              int ndim, int out_size) {
+__global__ void broadcast_elementwise_kernel(const float* __restrict__ a, 
+                                             const float* __restrict__ b,
+                                             float* __restrict__ c, 
+                                             BroadcastShapeInfo info, 
+                                             int out_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= out_size) return;
 
-    int a_off = broadcast_index(idx, out_shape, a_strides, a_shape, ndim);
-    int b_off = broadcast_index(idx, out_shape, b_strides, b_shape, ndim);
+    int a_off = broadcast_index(idx, info.out_shape, info.a_strides, info.a_shape, info.ndim);
+    int b_off = broadcast_index(idx, info.out_shape, info.b_strides, info.b_shape, info.ndim);
 
     float av = a[a_off], bv = b[b_off];
     float result;
@@ -41,16 +60,17 @@ __global__ void broadcast_elementwise_kernel(const float* __restrict__ a, const 
     else if constexpr (OP == ElementwiseOp::SUB) result = av - bv;
     else if constexpr (OP == ElementwiseOp::MUL) result = av * bv;
     else result = av / bv;
+    
     c[idx] = result;
 }
 
 // Computes right-aligned broadcast output shape + per-input padded shape/strides.
 // Returns false if shapes are not broadcast-compatible.
 static bool compute_broadcast_plan(const std::vector<int>& sa, const std::vector<int>& sta,
-                                    const std::vector<int>& sb, const std::vector<int>& stb,
-                                    std::vector<int>& out_shape,
-                                    std::vector<int>& pa_shape, std::vector<int>& pa_strides,
-                                    std::vector<int>& pb_shape, std::vector<int>& pb_strides) {
+                                   const std::vector<int>& sb, const std::vector<int>& stb,
+                                   std::vector<int>& out_shape,
+                                   std::vector<int>& pa_shape, std::vector<int>& pa_strides,
+                                   std::vector<int>& pb_shape, std::vector<int>& pb_strides) {
     int nd = std::max(sa.size(), sb.size());
     out_shape.resize(nd); pa_shape.resize(nd); pa_strides.resize(nd);
     pb_shape.resize(nd); pb_strides.resize(nd);
@@ -79,28 +99,36 @@ static std::shared_ptr<Tensor> run_cuda_broadcast_elementwise(std::shared_ptr<Te
     int out_size = result->size;
     int ndim = (int)out_shape.size();
 
-    int *d_out_shape, *d_a_shape, *d_a_strides, *d_b_shape, *d_b_strides;
-    cudaMalloc(&d_out_shape, ndim * sizeof(int));
-    cudaMalloc(&d_a_shape, ndim * sizeof(int));
-    cudaMalloc(&d_a_strides, ndim * sizeof(int));
-    cudaMalloc(&d_b_shape, ndim * sizeof(int));
-    cudaMalloc(&d_b_strides, ndim * sizeof(int));
-    cudaMemcpy(d_out_shape, out_shape.data(), ndim * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_a_shape, pa_shape.data(), ndim * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_a_strides, pa_strides.data(), ndim * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b_shape, pb_shape.data(), ndim * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b_strides, pb_strides.data(), ndim * sizeof(int), cudaMemcpyHostToDevice);
+    if (ndim > MAX_DIMS) {
+        throw std::runtime_error("broadcast_elementwise: tensor rank exceeds MAX_DIMS (8)");
+    }
+
+    // Populate the struct to pass by value
+    BroadcastShapeInfo info;
+    info.ndim = ndim;
+    for (int i = 0; i < ndim; ++i) {
+        info.out_shape[i] = out_shape[i];
+        info.a_shape[i] = pa_shape[i];
+        info.a_strides[i] = pa_strides[i];
+        info.b_shape[i] = pb_shape[i];
+        info.b_strides[i] = pb_strides[i];
+    }
 
     int threads = 256;
     int blocks = (out_size + threads - 1) / threads;
+    
+    // Launch kernel with by-value struct
     broadcast_elementwise_kernel<OP><<<blocks, threads>>>(
-        a->data_ptr, d_a_shape, d_a_strides,
-        b->data_ptr, d_b_shape, d_b_strides,
-        result->data_ptr, d_out_shape, ndim, out_size
+        a->data_ptr,
+        b->data_ptr,
+        result->data_ptr, 
+        info, 
+        out_size
     );
+    
     cudaError_t err = cudaGetLastError();
-    cudaFree(d_out_shape); cudaFree(d_a_shape); cudaFree(d_a_strides); cudaFree(d_b_shape); cudaFree(d_b_strides);
     if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    
     return result;
 }
 
