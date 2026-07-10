@@ -20,17 +20,23 @@ jobs:
         with:
           output-dir: dist
         env:
-          # 1. Target exactly Python 3.10, 3.11, 3.12, and 3.14
           CIBW_BUILD: "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp314-manylinux_x86_64"
-          
-          # 2. Use the AlmaLinux 8 container (supports modern CUDA)
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
-          
-          # 3. Inject CUDA 12.4 before compiling your C++ code
+
           CIBW_BEFORE_ALL_LINUX: >
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
             dnf clean all &&
             dnf -y install cuda-toolkit-12-4
+
+          # This is the missing piece: make nvcc (and the CUDA libs) visible to the
+          # actual build subprocess. CIBW_BEFORE_ALL_LINUX's environment does NOT
+          # persist into the wheel-building step — each runs as a separate process,
+          # so PATH must be set here explicitly for setup.py's shutil.which("nvcc")
+          # to find it, and for the linker to find libcudart/libcurand/libcublas.
+          CIBW_ENVIRONMENT_LINUX: >
+            PATH=/usr/local/cuda-12.4/bin:$PATH
+            LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+            CUDA_HOME=/usr/local/cuda-12.4
 
       - name: Upload wheels as artifacts
         uses: actions/upload-artifact@v4

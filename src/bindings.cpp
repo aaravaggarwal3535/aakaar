@@ -1008,17 +1008,17 @@ PYBIND11_MODULE(_C, m) {
           py::arg("array"), py::arg("device") = "cpu", py::arg("requires_grad") = false,
           "Create a Tensor from an existing numpy array, copying its data.");
     m.def("_openblas_diagnostic", &get_openblas_diagnostic);
+    m.def("is_available", &cuda_is_available, "Check if a CUDA-capable GPU is actually present and usable");
+    m.def("device_count", &cuda_device_count, "Number of CUDA-capable GPUs detected");
+    
+    #ifndef AAKAAR_NO_CUDA
+    m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");
+    m.def("cuda_matmul", &dispatch_matmul, "cuBLAS GPU matrix multiplication");
+    m.def("empty_cache", &empty_cache, "Release cached GPU memory");
     m.def("_allocator_stats", []() -> py::tuple {
     auto [hits, misses] = CachingAllocator::get_instance().get_stats();
     return py::make_tuple(hits, misses);
 });
-    m.def("is_available", &cuda_is_available, "Check if a CUDA-capable GPU is actually present and usable");
-    m.def("device_count", &cuda_device_count, "Number of CUDA-capable GPUs detected");
-
-#ifndef AAKAAR_NO_CUDA
-    m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");
-    m.def("cuda_matmul", &dispatch_matmul, "cuBLAS GPU matrix multiplication");
-    m.def("empty_cache", &empty_cache, "Release cached GPU memory");
     m.attr("HAS_CUDA") = true;
 #else
     m.attr("HAS_CUDA") = false;
