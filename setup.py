@@ -17,6 +17,10 @@ print(f"CUDA toolkit detected: {CUDA_AVAILABLE}")
 class CUDABuildExtension(build_ext):
     def build_extensions(self):
         is_windows = sys.platform == "win32"
+
+        # ---------------------------------------------------------------
+        # OpenBLAS wiring
+        # ---------------------------------------------------------------
         if is_windows:
             openblas_root = os.environ.get("OPENBLAS_ROOT", r"C:\openblas-prebuilt")
             openblas_include = os.path.join(openblas_root, "include")
@@ -28,7 +32,41 @@ class CUDABuildExtension(build_ext):
                     ext.libraries.append("libopenblas")
             else:
                 print("WARNING: OpenBLAS cblas.h not found at", openblas_include)
+        else:
+            # Linux: openblas-devel (installed via CIBW_BEFORE_ALL_LINUX) puts
+            # cblas.h either directly on the system include path or under an
+            # openblas/ subdirectory depending on distro packaging — check
+            # both rather than assuming one, since guessing wrong here fails
+            # silently at compile time with a "No such file" error.
+            candidate_includes = [
+                "/usr/include/openblas",
+                "/usr/include",
+                "/usr/local/include/openblas",
+                "/usr/local/include",
+            ]
+            found_include = None
+            for cand in candidate_includes:
+                if os.path.isfile(os.path.join(cand, "cblas.h")):
+                    found_include = cand
+                    break
 
+            if found_include:
+                for ext in self.extensions:
+                    if found_include not in ext.include_dirs:
+                        ext.include_dirs.append(found_include)
+                    ext.libraries.append("openblas")
+                # lib64 is where openblas-devel puts the .so on AlmaLinux/RHEL-family
+                for libdir in ("/usr/lib64", "/usr/lib", "/usr/local/lib"):
+                    if os.path.isdir(libdir):
+                        for ext in self.extensions:
+                            if libdir not in ext.library_dirs:
+                                ext.library_dirs.append(libdir)
+            else:
+                print("WARNING: OpenBLAS cblas.h not found on Linux in any of:", candidate_includes)
+
+        # ---------------------------------------------------------------
+        # CUDA wiring
+        # ---------------------------------------------------------------
         if CUDA_AVAILABLE:
             cuda_home = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME") or "/usr/local/cuda"
             cuda_include = os.path.join(cuda_home, "include")
@@ -39,6 +77,15 @@ class CUDABuildExtension(build_ext):
                           "-gencode=arch=compute_75,code=sm_75",
                           "-gencode=arch=compute_86,code=sm_86",
                           "-gencode=arch=compute_89,code=sm_89"]
+
+            # Point nvcc at GCC 13 explicitly rather than letting it fall back
+            # to the container's default GCC (GCC 14 on manylinux_2_28), which
+            # CUDA 12.4 does not support. -allow-unsupported-compiler was tried
+            # first and rejected: forcing nvcc to parse GCC 14's real headers
+            # produced genuine compile errors (std::make_shared and others),
+            # confirming the incompatibility is real, not just an overcautious
+            # version gate. -ccbin routes nvcc's host-side compilation through
+            # a compiler CUDA 12.4 was actually validated against.
             gcc13_path = "/opt/rh/gcc-toolset-13/root/usr/bin/g++"
             if not is_windows and os.path.isfile(gcc13_path):
                 nvcc_flags.append(f"-ccbin={gcc13_path}")

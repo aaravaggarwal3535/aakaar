@@ -12,7 +12,8 @@
 Built from the ground up, Aakaar bridges the gap between Python's ease of use and C++'s execution speed, providing a PyTorch-like API for tensor manipulation, automatic differentiation, and neural network construction.
 
 ---
-
+## Official docs link:
+**<a>https://aakaar.readthedocs.io/en/latest/</a>**
 
 ## Core Architecture
 
