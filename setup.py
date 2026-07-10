@@ -36,6 +36,7 @@ class CUDABuildExtension(build_ext):
 
             nvcc_flags = ["-O3",
                           "-std=c++17",
+                          "-allow-unsupported-compiler",
                           "-gencode=arch=compute_75,code=sm_75",
                           "-gencode=arch=compute_86,code=sm_86",
                           "-gencode=arch=compute_89,code=sm_89"]
