@@ -1,9 +1,12 @@
 #pragma once
+
+#ifndef AAKAAR_NO_CUDA
 #include <cuda_runtime.h>
 #include <unordered_map>
 #include <vector>
 #include <stdexcept>
 #include <iostream>
+#endif // AAKAAR_NO_CUDA
 
 class CachingAllocator {
 private:
