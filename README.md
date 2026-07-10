@@ -1,6 +1,18 @@
-# Aakaar
+<h1 align="center" style="display: flex; align-items: center; justify-content: center;">
+  <img src="assets/aakaar_logo.svg" alt="Aakaar Logo" width="60" style="vertical-align: middle; margin-right: 15px;"/>
+  <span style="vertical-align: middle;">Aakaar</span>
+</h1>
 
-Aakaar is a custom, standalone deep learning library built from the ground up using Python, C++, and raw CUDA. It implements N-dimensional tensors, a broadcasting-aware reverse-mode autograd engine, and a small set of neural network building blocks — all without relying on PyTorch, TensorFlow, or any other heavy external framework.
+<p align="center">
+  <em>A high-performance, custom-built deep learning tensor library with a dynamic autograd engine and native C++/CUDA hardware acceleration.</em>
+</p>
+
+<br>
+
+Built from the ground up, Aakaar bridges the gap between Python's ease of use and C++'s execution speed, providing a PyTorch-like API for tensor manipulation, automatic differentiation, and neural network construction.
+
+---
+
 
 ## Core Architecture
 
@@ -115,3 +127,11 @@ print(f"final loss: {loss.item():.6f}")
 * `matmul` backward supports broadcasting batch dimensions, but not yet arbitrary mixed-rank batch shapes beyond standard right-aligned broadcasting rules.
 * Only `float32` is currently supported. Support for additional dtypes (float16, float64, int types) is a planned future addition, not yet implemented.
 * This is an actively developed project; APIs may change between minor versions.
+
+## ☕ Support the Development
+
+If Aakaar helped you learn how autograd architectures work under the hood, or if you want to support independent, dependency-free deep learning infrastructure, consider dropping a tip!
+
+* **International Supporters:** You can buy me a coffee via [Ko-fi (Coming Soon)](#) using any standard international debit/credit card. 
+* **India (UPI):** Since international gateways occasionally restrict domestic transfers, you can support directly via UPI:  
+  aaravaggarwal3535@okicici

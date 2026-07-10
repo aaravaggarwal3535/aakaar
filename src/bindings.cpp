@@ -29,13 +29,13 @@ std::shared_ptr<Tensor> run_cpu_broadcast_axis(std::shared_ptr<Tensor> a, int di
 std::shared_ptr<Tensor> run_cpu_relu(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
 std::shared_ptr<Tensor> run_cpu_sigmoid(std::shared_ptr<Tensor> a);
-std::shared_ptr<Tensor> run_cpu_sigmoid_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> sig_output);
+std::shared_ptr<Tensor> run_cpu_sigmoid_backward(std::shared_ptr<Tensor> grad_out, const float* sig_out_ptr, int size, std::vector<int> shape);
 std::shared_ptr<Tensor> run_cpu_tanh(std::shared_ptr<Tensor> a);
-std::shared_ptr<Tensor> run_cpu_tanh_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> tanh_output);
+std::shared_ptr<Tensor> run_cpu_tanh_backward(std::shared_ptr<Tensor> grad_out, const float* tanh_out_ptr, int size, std::vector<int> shape);
 std::shared_ptr<Tensor> run_cpu_leaky_relu(std::shared_ptr<Tensor> a, float slope);
 std::shared_ptr<Tensor> run_cpu_leaky_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, float slope);
 std::shared_ptr<Tensor> run_cpu_exp(std::shared_ptr<Tensor> a);
-std::shared_ptr<Tensor> run_cpu_exp_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> exp_output);
+std::shared_ptr<Tensor> run_cpu_exp_backward(std::shared_ptr<Tensor> grad_out, const float* exp_out_ptr, int size, std::vector<int> shape);
 std::shared_ptr<Tensor> run_cpu_log(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_log_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
 std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
@@ -62,13 +62,13 @@ std::shared_ptr<Tensor> run_cuda_broadcast_axis(std::shared_ptr<Tensor> a, int d
 std::shared_ptr<Tensor> run_cuda_relu(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
 std::shared_ptr<Tensor> run_cuda_sigmoid(std::shared_ptr<Tensor> a);
-std::shared_ptr<Tensor> run_cuda_sigmoid_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> sig_output);
+std::shared_ptr<Tensor> run_cuda_sigmoid_backward(std::shared_ptr<Tensor> grad_out, const float* sig_out_ptr, int size, std::vector<int> shape);
 std::shared_ptr<Tensor> run_cuda_tanh(std::shared_ptr<Tensor> a);
-std::shared_ptr<Tensor> run_cuda_tanh_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> tanh_output);
+std::shared_ptr<Tensor> run_cuda_tanh_backward(std::shared_ptr<Tensor> grad_out, const float* tanh_out_ptr, int size, std::vector<int> shape);
 std::shared_ptr<Tensor> run_cuda_leaky_relu(std::shared_ptr<Tensor> a, float slope);
 std::shared_ptr<Tensor> run_cuda_leaky_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, float slope);
 std::shared_ptr<Tensor> run_cuda_exp(std::shared_ptr<Tensor> a);
-std::shared_ptr<Tensor> run_cuda_exp_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> exp_output);
+std::shared_ptr<Tensor> run_cuda_exp_backward(std::shared_ptr<Tensor> grad_out, const float* exp_out_ptr, int size, std::vector<int> shape);
 std::shared_ptr<Tensor> run_cuda_log(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_log_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
 std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cuda_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
@@ -90,6 +90,22 @@ static std::shared_ptr<Tensor> dispatch_matmul(std::shared_ptr<Tensor> a, std::s
 static std::shared_ptr<Tensor> dispatch_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
 static std::shared_ptr<Tensor> dispatch_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size);
 static std::shared_ptr<Tensor> dispatch_contiguous(std::shared_ptr<Tensor> a);
+
+// Add near your other includes/declarations
+int cuda_device_count() {
+#ifdef AAKAAR_NO_CUDA
+    return 0;
+#else
+    int count = 0;
+    cudaError_t err = cudaGetDeviceCount(&count);
+    if (err != cudaSuccess) return 0;  // no driver, no GPU, etc. — not an error condition, just "unavailable"
+    return count;
+#endif
+}
+
+bool cuda_is_available() {
+    return cuda_device_count() > 0;
+}
 
 // ---- Dispatch implementations ----
 static std::shared_ptr<Tensor> dispatch_leaky_relu(std::shared_ptr<Tensor> a, float slope) {
@@ -166,12 +182,17 @@ static std::shared_ptr<Tensor> dispatch_exp(std::shared_ptr<Tensor> a) {
         auto node = std::make_shared<Node>();
         node->inputs = {a};
         node->op_name = "exp";
-        auto output_copy = result;
-        node->backward_fn = [output_copy](std::shared_ptr<Tensor> grad_out) {
+        
+        float* out_ptr = result->data_ptr;
+        int out_size = result->size;
+        auto out_shape = result->shape;
+        auto out_device = result->device;
+        
+        node->backward_fn = [out_ptr, out_size, out_shape, out_device](std::shared_ptr<Tensor> grad_out) {
 #ifndef AAKAAR_NO_CUDA
-            if (output_copy->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_exp_backward(grad_out, output_copy)};
+            if (out_device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_exp_backward(grad_out, out_ptr, out_size, out_shape)};
 #endif
-            return std::vector<std::shared_ptr<Tensor>>{run_cpu_exp_backward(grad_out, output_copy)};
+            return std::vector<std::shared_ptr<Tensor>>{run_cpu_exp_backward(grad_out, out_ptr, out_size, out_shape)};
         };
         result->grad_fn = node;
     }
@@ -327,12 +348,18 @@ static std::shared_ptr<Tensor> dispatch_sigmoid(std::shared_ptr<Tensor> a) {
         auto node = std::make_shared<Node>();
         node->inputs = {a};
         node->op_name = "sigmoid";
-        auto output_copy = result;  // capture the OUTPUT, since sigmoid's derivative uses it, not the input
-        node->backward_fn = [output_copy](std::shared_ptr<Tensor> grad_out) {
+        // Capture raw pointer/shape only — NOT `result` itself, which would
+        // create a shared_ptr cycle (result->grad_fn->backward_fn->result)
+        // that leaks memory forever since refcounting can't collect cycles.
+        float* out_ptr = result->data_ptr;
+        int out_size = result->size;
+        auto out_shape = result->shape;
+        auto out_device = result->device;
+        node->backward_fn = [out_ptr, out_size, out_shape, out_device](std::shared_ptr<Tensor> grad_out) {
 #ifndef AAKAAR_NO_CUDA
-            if (output_copy->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_sigmoid_backward(grad_out, output_copy)};
+            if (out_device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_sigmoid_backward(grad_out, out_ptr, out_size, out_shape)};
 #endif
-            return std::vector<std::shared_ptr<Tensor>>{run_cpu_sigmoid_backward(grad_out, output_copy)};
+            return std::vector<std::shared_ptr<Tensor>>{run_cpu_sigmoid_backward(grad_out, out_ptr, out_size, out_shape)};
         };
         result->grad_fn = node;
     }
@@ -353,12 +380,17 @@ static std::shared_ptr<Tensor> dispatch_tanh(std::shared_ptr<Tensor> a) {
         auto node = std::make_shared<Node>();
         node->inputs = {a};
         node->op_name = "tanh";
-        auto output_copy = result;
-        node->backward_fn = [output_copy](std::shared_ptr<Tensor> grad_out) {
+        
+        float* out_ptr = result->data_ptr;
+        int out_size = result->size;
+        auto out_shape = result->shape;
+        auto out_device = result->device;
+        
+        node->backward_fn = [out_ptr, out_size, out_shape, out_device](std::shared_ptr<Tensor> grad_out) {
 #ifndef AAKAAR_NO_CUDA
-            if (output_copy->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_tanh_backward(grad_out, output_copy)};
+            if (out_device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_tanh_backward(grad_out, out_ptr, out_size, out_shape)};
 #endif
-            return std::vector<std::shared_ptr<Tensor>>{run_cpu_tanh_backward(grad_out, output_copy)};
+            return std::vector<std::shared_ptr<Tensor>>{run_cpu_tanh_backward(grad_out, out_ptr, out_size, out_shape)};
         };
         result->grad_fn = node;
     }
@@ -977,6 +1009,12 @@ PYBIND11_MODULE(_C, m) {
           py::arg("array"), py::arg("device") = "cpu", py::arg("requires_grad") = false,
           "Create a Tensor from an existing numpy array, copying its data.");
     m.def("_openblas_diagnostic", &get_openblas_diagnostic);
+    m.def("_allocator_stats", []() {
+        auto [hits, misses] = CachingAllocator::get_instance().get_stats();
+        return py::make_tuple(hits, misses);
+    });
+    m.def("is_available", &cuda_is_available, "Check if a CUDA-capable GPU is actually present and usable");
+    m.def("device_count", &cuda_device_count, "Number of CUDA-capable GPUs detected");
 
 #ifndef AAKAAR_NO_CUDA
     m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");

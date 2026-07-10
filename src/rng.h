@@ -6,9 +6,10 @@ class CUDARandomManager {
 private:
     curandGenerator_t generator;
     bool initialized;
+    unsigned long long last_seed;
+    bool has_seed;
 
-    // Private constructor (Singleton)
-    CUDARandomManager() : initialized(false) {}
+    CUDARandomManager() : initialized(false), has_seed(false), last_seed(0) {}
 
 public:
     static CUDARandomManager& get_instance() {
@@ -16,22 +17,25 @@ public:
         return instance;
     }
 
-    // Initialize the generator only once
-    // Initialize the generator only once
     curandGenerator_t get_generator(unsigned long long seed) {
         if (!initialized) {
             curandStatus_t status = curandCreateGenerator(&generator, CURAND_RNG_PSEUDO_DEFAULT);
-            if (status != CURAND_STATUS_SUCCESS) {  // <--- FIXED HERE
+            if (status != CURAND_STATUS_SUCCESS) {
                 throw std::runtime_error("Failed to create cuRAND generator");
             }
             initialized = true;
         }
-        
-        curandSetPseudoRandomGeneratorSeed(generator, seed);
+
+        // Only pay the (expensive) reseed cost when the seed actually changed.
+        if (!has_seed || seed != last_seed) {
+            curandSetPseudoRandomGeneratorSeed(generator, seed);
+            last_seed = seed;
+            has_seed = true;
+        }
+
         return generator;
     }
 
-    // Clean up the generator when the engine shuts down
     ~CUDARandomManager() {
         if (initialized) {
             curandDestroyGenerator(generator);

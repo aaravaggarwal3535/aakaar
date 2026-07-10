@@ -1,0 +1,86 @@
+[project]
+site_name = "Aakaar"
+site_description = "A custom CUDA-accelerated ML library built from scratch."
+docs_dir = "docs"
+repo_name = "aaravaggarwal3535/aakaar"
+repo_url = "https://github.com/aaravaggarwal3535/aakaar"
+extra_css = ["stylesheets/extra.css"]
+extra_javascript = ["javascripts/extra.js"]
+
+# Navigation mapping exactly to your README breakdown
+# Navigation mapping exactly to your granular file structure
+nav = [
+  { "Home" = "index.md" },
+  { "Getting Started" = [
+        { "Installation" = "getting-started/installation.md" },
+        { "Quick Start" = "getting-started/quick-start.md" }
+    ]},
+  { "Core Concepts" = [
+      { "Tensor Creation" = [
+          { "from_numpy" = "concepts/tensor-creation/from_numpy.md" },
+          { "rand" = "concepts/tensor-creation/rand.md" }
+      ]},
+      { "Math Operations" = [
+          { "add" = "concepts/math-operations/add.md" },
+          { "sub" = "concepts/math-operations/sub.md" },
+          { "matmul" = "concepts/math-operations/matmul.md" }
+      ]},
+      { "Autograd State" = [
+          { "no_grad" = "concepts/autograd-state/no_grad.md" },
+          { "is_grad_enabled" = "concepts/autograd-state/is_grad_enabled.md" },
+          { "zero_grad_all" = "concepts/autograd-state/zero_grad_all.md" }
+      ]},
+      { "Hardware & CUDA" = [
+          { "is_available" = "concepts/hardware-and-cuda/is_available.md" },
+          { "device_count" = "concepts/hardware-and-cuda/device_count.md" }
+      ]}
+  ]},
+  { "API Reference" = [
+      { "aakaar.functional" = [
+          { "softmax" = "api/functional/softmax.md" },
+          { "mse_loss" = "api/functional/mse_loss.md" },
+          { "cross_entropy_from_probs" = "api/functional/cross_entropy_from_probs.md" }
+      ]},
+      { "aakaar.nn" = [
+          { "Linear" = "api/nn/Linear.md" }
+      ]},
+      { "aakaar.optim" = [
+          { "SGD" = "api/optim/SGD.md" }
+      ]}
+  ]},
+  { "Limitations" = "limitations.md" }
+]
+
+[project.theme]
+variant = "modern"
+name = "material"
+logo = "assets/aakaar_logo.png"
+favicon = "assets/aakaar_logo.png"
+
+# --- Unified Color Configuration & Mode Toggles ---
+
+# --- Light Mode ---
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "indigo"
+accent = "cyan"
+toggle = { icon = "material/brightness-7", name = "Switch to dark mode" }
+
+# --- Dark Mode ---
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "indigo"
+accent = "cyan"
+toggle = { icon = "material/brightness-4", name = "Switch to light mode" }
+
+[project.extra]
+generator = false
+# Copy-to-clipboard and other professional features
+features = [
+  "navigation.tabs",
+  "navigation.sections",
+  "content.code.copy",
+  "navigation.instant" 
+]

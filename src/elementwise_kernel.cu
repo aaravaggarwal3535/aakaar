@@ -467,28 +467,23 @@ std::shared_ptr<Tensor> run_cuda_sigmoid(std::shared_ptr<Tensor> a) {
     return result;
 }
 
-std::shared_ptr<Tensor> run_cuda_sigmoid_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> sig_output) {
-    auto result = std::make_shared<Tensor>(sig_output->shape, std::string("cuda"));
-    int n = sig_output->size;
-    if (n == 0) return result;
-    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
-                            && is_aligned16(sig_output->data_ptr)
-                            && is_aligned16(result->data_ptr);
+std::shared_ptr<Tensor> run_cuda_sigmoid_backward(std::shared_ptr<Tensor> grad_out, const float* sig_out_ptr, int size, std::vector<int> shape) {
+    auto result = std::make_shared<Tensor>(shape, std::string("cuda"));
+    if (size == 0) return result;
+    bool can_vec = (size >= 4) && is_aligned16(grad_out->data_ptr) && is_aligned16(sig_out_ptr) && is_aligned16(result->data_ptr);
     if (can_vec) {
-        int n4 = n / 4;
-        int tail = n - n4 * 4;
+        int n4 = size / 4;
+        int tail = size - n4 * 4;
         sigmoid_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
             reinterpret_cast<const float4*>(grad_out->data_ptr),
-            reinterpret_cast<const float4*>(sig_output->data_ptr),
+            reinterpret_cast<const float4*>(sig_out_ptr),
             reinterpret_cast<float4*>(result->data_ptr), n4);
         if (tail > 0) {
             sigmoid_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                grad_out->data_ptr + n4 * 4, sig_output->data_ptr + n4 * 4,
-                result->data_ptr + n4 * 4, tail);
+                grad_out->data_ptr + n4*4, sig_out_ptr + n4*4, result->data_ptr + n4*4, tail);
         }
     } else {
-        sigmoid_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
-            grad_out->data_ptr, sig_output->data_ptr, result->data_ptr, n);
+        sigmoid_backward_scalar_kernel<<<elem_blocks(size), 256>>>(grad_out->data_ptr, sig_out_ptr, result->data_ptr, size);
     }
     return result;
 }
@@ -568,28 +563,28 @@ std::shared_ptr<Tensor> run_cuda_tanh(std::shared_ptr<Tensor> a) {
     return result;
 }
 
-std::shared_ptr<Tensor> run_cuda_tanh_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> tanh_output) {
-    auto result = std::make_shared<Tensor>(tanh_output->shape, std::string("cuda"));
-    int n = tanh_output->size;
-    if (n == 0) return result;
-    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
-                            && is_aligned16(tanh_output->data_ptr)
+std::shared_ptr<Tensor> run_cuda_tanh_backward(std::shared_ptr<Tensor> grad_out, const float* tanh_out_ptr, int size, std::vector<int> shape) {
+    auto result = std::make_shared<Tensor>(shape, std::string("cuda"));
+    if (size == 0) return result;
+    
+    bool can_vec = (size >= 4) && is_aligned16(grad_out->data_ptr)
+                            && is_aligned16(tanh_out_ptr)
                             && is_aligned16(result->data_ptr);
     if (can_vec) {
-        int n4 = n / 4;
-        int tail = n - n4 * 4;
+        int n4 = size / 4;
+        int tail = size - n4 * 4;
         tanh_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
             reinterpret_cast<const float4*>(grad_out->data_ptr),
-            reinterpret_cast<const float4*>(tanh_output->data_ptr),
+            reinterpret_cast<const float4*>(tanh_out_ptr),
             reinterpret_cast<float4*>(result->data_ptr), n4);
         if (tail > 0) {
             tanh_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                grad_out->data_ptr + n4 * 4, tanh_output->data_ptr + n4 * 4,
+                grad_out->data_ptr + n4 * 4, tanh_out_ptr + n4 * 4,
                 result->data_ptr + n4 * 4, tail);
         }
     } else {
-        tanh_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
-            grad_out->data_ptr, tanh_output->data_ptr, result->data_ptr, n);
+        tanh_backward_scalar_kernel<<<elem_blocks(size), 256>>>(
+            grad_out->data_ptr, tanh_out_ptr, result->data_ptr, size);
     }
     return result;
 }
@@ -782,30 +777,29 @@ std::shared_ptr<Tensor> run_cuda_exp(std::shared_ptr<Tensor> a) {
     return result;
 }
 
-std::shared_ptr<Tensor> run_cuda_exp_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> exp_output) {
-    auto result = std::make_shared<Tensor>(exp_output->shape, std::string("cuda"));
-    int n = exp_output->size;
-    if (n == 0) return result;
+std::shared_ptr<Tensor> run_cuda_exp_backward(std::shared_ptr<Tensor> grad_out, const float* exp_out_ptr, int size, std::vector<int> shape) {
+    auto result = std::make_shared<Tensor>(shape, std::string("cuda"));
+    if (size == 0) return result;
 
-    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
-                            && is_aligned16(exp_output->data_ptr)
+    bool can_vec = (size >= 4) && is_aligned16(grad_out->data_ptr)
+                            && is_aligned16(exp_out_ptr)
                             && is_aligned16(result->data_ptr);
 
     if (can_vec) {
-        int n4 = n / 4;
-        int tail = n - n4 * 4;
+        int n4 = size / 4;
+        int tail = size - n4 * 4;
         exp_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
             reinterpret_cast<const float4*>(grad_out->data_ptr),
-            reinterpret_cast<const float4*>(exp_output->data_ptr),
+            reinterpret_cast<const float4*>(exp_out_ptr),
             reinterpret_cast<float4*>(result->data_ptr), n4);
         if (tail > 0) {
             exp_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                grad_out->data_ptr + n4 * 4, exp_output->data_ptr + n4 * 4,
+                grad_out->data_ptr + n4 * 4, exp_out_ptr + n4 * 4,
                 result->data_ptr + n4 * 4, tail);
         }
     } else {
-        exp_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
-            grad_out->data_ptr, exp_output->data_ptr, result->data_ptr, n);
+        exp_backward_scalar_kernel<<<elem_blocks(size), 256>>>(
+            grad_out->data_ptr, exp_out_ptr, result->data_ptr, size);
     }
     return result;
 }

@@ -1,0 +1,27 @@
+/* docs/stylesheets/extra.css */
+#permanent-kofi-btn {
+  position: fixed;
+  right: 20px;       /* Locks it to the right side */
+  bottom: 20px;      /* Distance from the bottom */
+  z-index: 9999;     /* Ensures it floats above all other content */
+  transition: transform 0.2s ease-in-out;
+}
+
+#permanent-kofi-btn:hover {
+  transform: scale(1.05);
+}
+
+#permanent-kofi-btn img {
+  height: 40px;
+  border: none;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+}
+
+/* Move it up slightly on mobile so it doesn't overlap phone navigation bars */
+@media screen and (max-width: 600px) {
+  #permanent-kofi-btn {
+    bottom: 80px; 
+    right: 15px;
+  }
+}

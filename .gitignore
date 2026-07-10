@@ -23,3 +23,5 @@ build_script.txt
 test.py
 
 build*/
+
+site*/

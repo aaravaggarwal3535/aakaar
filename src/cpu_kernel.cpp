@@ -287,15 +287,14 @@ std::shared_ptr<Tensor> run_cpu_sigmoid(std::shared_ptr<Tensor> a) {
     }
     return result;
 }
-std::shared_ptr<Tensor> run_cpu_sigmoid_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> sig_output) {
-    auto result = std::make_shared<Tensor>(sig_output->shape, std::string("cpu"));
-    for (int i = 0; i < sig_output->size; ++i) {
-        float s = sig_output->data_ptr[i];
+std::shared_ptr<Tensor> run_cpu_sigmoid_backward(std::shared_ptr<Tensor> grad_out, const float* sig_out_ptr, int size, std::vector<int> shape) {
+    auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
+    for (int i = 0; i < size; ++i) {
+        float s = sig_out_ptr[i];
         result->data_ptr[i] = grad_out->data_ptr[i] * s * (1.0f - s);
     }
     return result;
 }
-
 std::shared_ptr<Tensor> run_cpu_tanh(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     for (int i = 0; i < a->size; ++i) {
@@ -303,10 +302,10 @@ std::shared_ptr<Tensor> run_cpu_tanh(std::shared_ptr<Tensor> a) {
     }
     return result;
 }
-std::shared_ptr<Tensor> run_cpu_tanh_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> tanh_output) {
-    auto result = std::make_shared<Tensor>(tanh_output->shape, std::string("cpu"));
-    for (int i = 0; i < tanh_output->size; ++i) {
-        float t = tanh_output->data_ptr[i];
+std::shared_ptr<Tensor> run_cpu_tanh_backward(std::shared_ptr<Tensor> grad_out, const float* tanh_out_ptr, int size, std::vector<int> shape) {
+    auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
+    for (int i = 0; i < size; ++i) {
+        float t = tanh_out_ptr[i];
         result->data_ptr[i] = grad_out->data_ptr[i] * (1.0f - t * t);
     }
     return result;
@@ -332,9 +331,11 @@ std::shared_ptr<Tensor> run_cpu_exp(std::shared_ptr<Tensor> a) {
     for (int i = 0; i < a->size; ++i) result->data_ptr[i] = std::exp(a->get_scalar_flat(i));
     return result;
 }
-std::shared_ptr<Tensor> run_cpu_exp_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> exp_output) {
-    auto result = std::make_shared<Tensor>(exp_output->shape, std::string("cpu"));
-    for (int i = 0; i < exp_output->size; ++i) result->data_ptr[i] = grad_out->data_ptr[i] * exp_output->data_ptr[i];
+std::shared_ptr<Tensor> run_cpu_exp_backward(std::shared_ptr<Tensor> grad_out, const float* exp_out_ptr, int size, std::vector<int> shape) {
+    auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
+    for (int i = 0; i < size; ++i) {
+        result->data_ptr[i] = grad_out->data_ptr[i] * exp_out_ptr[i];
+    }
     return result;
 }
 std::shared_ptr<Tensor> run_cpu_log(std::shared_ptr<Tensor> a) {
