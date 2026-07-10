@@ -1009,10 +1009,10 @@ PYBIND11_MODULE(_C, m) {
           py::arg("array"), py::arg("device") = "cpu", py::arg("requires_grad") = false,
           "Create a Tensor from an existing numpy array, copying its data.");
     m.def("_openblas_diagnostic", &get_openblas_diagnostic);
-    m.def("_allocator_stats", []() {
-        auto [hits, misses] = CachingAllocator::get_instance().get_stats();
-        return py::make_tuple(hits, misses);
-    });
+    m.def("_allocator_stats", []() -> py::tuple {
+    auto [hits, misses] = CachingAllocator::get_instance().get_stats();
+    return py::make_tuple(hits, misses);
+});
     m.def("is_available", &cuda_is_available, "Check if a CUDA-capable GPU is actually present and usable");
     m.def("device_count", &cuda_device_count, "Number of CUDA-capable GPUs detected");
 
