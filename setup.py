@@ -36,10 +36,13 @@ class CUDABuildExtension(build_ext):
 
             nvcc_flags = ["-O3",
                           "-std=c++17",
-                          "-allow-unsupported-compiler",
                           "-gencode=arch=compute_75,code=sm_75",
                           "-gencode=arch=compute_86,code=sm_86",
                           "-gencode=arch=compute_89,code=sm_89"]
+            gcc13_path = "/opt/rh/gcc-toolset-13/root/usr/bin/g++"
+            if not is_windows and os.path.isfile(gcc13_path):
+                nvcc_flags.append(f"-ccbin={gcc13_path}")
+
             nvcc_flags.append("-Xcompiler=/MD" if is_windows else "-Xcompiler=-fPIC")
 
         for ext in self.extensions:
