@@ -75,7 +75,10 @@ host_compiler_flags = ["/std:c++17"] if sys.platform == "win32" else ["-std=c++1
 aakaar_ext = Extension(
     "aakaar._C",
     sources=["src/bindings.cpp", "src/cpu_kernel.cpp", "src/random_kernel.cu", 'src/matmul_kernel.cu', 'src/elementwise_kernel.cu', 'src/reduction_kernel.cu', 'src/strided_copy_kernel.cu'],
-    include_dirs=[pybind11.get_include()],
+    include_dirs=[
+    pybind11.get_include(),
+    "src",
+],
     libraries=[],  # populated conditionally above
     language="c++",
     extra_compile_args=host_compiler_flags
