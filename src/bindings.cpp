@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
+#include <allocator.h>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
