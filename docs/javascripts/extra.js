@@ -9,7 +9,7 @@ document$.subscribe(function() {
     // Style the container for a VERTICAL stack
     Object.assign(container.style, {
       position: "fixed",
-      bottom: "20px",
+      bottom: "100px",
       right: "20px",
       display: "flex",
       flexDirection: "column", 
