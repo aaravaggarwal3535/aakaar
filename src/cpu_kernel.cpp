@@ -6,11 +6,31 @@
 #include <omp.h>
 #include <cblas.h>
 
-extern "C" char* openblas_get_config(void);
-extern "C" char* openblas_get_corename(void);
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 std::string get_openblas_diagnostic() {
+#ifdef _WIN32
+    extern "C" char* openblas_get_config(void);
+    extern "C" char* openblas_get_corename(void);
     return std::string("Config: ") + openblas_get_config() + " | Core: " + openblas_get_corename();
+#else
+    void* self = dlopen(nullptr, RTLD_NOW);
+    std::string result = "Config: ";
+    if (self) {
+        typedef char* (*config_fn)(void);
+        auto get_config = (config_fn)dlsym(self, "openblas_get_config");
+        auto get_corename = (config_fn)dlsym(self, "openblas_get_corename");
+        result += get_config ? get_config() : "unavailable";
+        result += " | Core: ";
+        result += get_corename ? get_corename() : "unavailable";
+        dlclose(self);
+    } else {
+        result += "unavailable | Core: unavailable";
+    }
+    return result;
+#endif
 }
 
 void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed) {

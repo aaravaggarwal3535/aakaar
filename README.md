@@ -1,5 +1,5 @@
 <h1 align="center" style="display: flex; align-items: center; justify-content: center;">
-  <img src="docs/assets/aakaar_logo.svg" alt="Aakaar Logo" width="60" style="vertical-align: middle; margin-right: 15px;"/>
+  <img src="https://raw.githubusercontent.com/aaravaggarwal3535/aakaar/refs/heads/main/docs/assets/aakaar_logo.png" alt="Aakaar Logo" width="60" style="vertical-align: middle; margin-right: 15px;"/>
   <span style="vertical-align: middle;">Aakaar</span>
 </h1>
 
