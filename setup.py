@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -10,7 +11,63 @@ import pybind11
 
 def has_nvcc():
     return shutil.which("nvcc") is not None
+def get_nvcc_version():
+    """Returns (major, minor) from `nvcc --version`, or None if nvcc unavailable."""
+    try:
+        out = subprocess.check_output(["nvcc", "--version"], text=True)
+        match = re.search(r"release (\d+)\.(\d+)", out)
+        if match:
+            return (int(match.group(1)), int(match.group(2)))
+    except Exception:
+        pass
+    return None
 
+def get_gencode_flags():
+    version = get_nvcc_version()
+    if version is None:
+        version = (12, 0)
+
+    major, minor = version
+    ver = major * 10 + minor
+
+    flags = []
+
+    # sm_60/61/62 (Pascal): supported CUDA 8-12.x, DROPPED in CUDA 13.0+
+    if ver < 130:
+        flags.append("-gencode=arch=compute_60,code=sm_60")
+
+    # sm_70/72 (Volta): supported CUDA 9-12.x, ALSO DROPPED in CUDA 13.0+
+    # (CUDA 13's minimum supported architecture is Turing / sm_75 — this was
+    # the actual cause of the "nvcc ... exit status 1" build failure under
+    # CUDA 13.3: compute_70/sm_70 is no longer a recognized -gencode target.)
+    if ver < 130:
+        flags.append("-gencode=arch=compute_70,code=sm_70")
+
+    # sm_75 (Turing, RTX 20-series): broadly supported, and is CUDA 13.x's
+    # actual minimum supported architecture.
+    flags.append("-gencode=arch=compute_75,code=sm_75")
+
+    # sm_80/86 (Ampere): CUDA 11.0+
+    flags.append("-gencode=arch=compute_80,code=sm_80")
+    flags.append("-gencode=arch=compute_86,code=sm_86")
+
+    # sm_89 (Ada, RTX 40-series): CUDA 11.8+
+    if ver >= 118:
+        flags.append("-gencode=arch=compute_89,code=sm_89")
+
+    # sm_90 (Hopper): CUDA 11.8+ (12.0+ recommended)
+    if ver >= 120:
+        flags.append("-gencode=arch=compute_90,code=sm_90")
+
+    # sm_120 (Blackwell, RTX 50-series): CUDA 12.8+
+    if ver >= 128:
+        flags.append("-gencode=arch=compute_120,code=sm_120")
+
+    newest_arch = "compute_120" if ver >= 128 else ("compute_90" if ver >= 120 else "compute_86")
+    flags.append(f"-gencode=arch={newest_arch},code={newest_arch}")
+
+    print(f"Detected CUDA {major}.{minor} — using gencode targets: {flags}")
+    return flags
 
 CUDA_AVAILABLE = has_nvcc()
 print(f"CUDA toolkit detected: {CUDA_AVAILABLE}")
@@ -144,13 +201,8 @@ class CUDABuildExtension(build_ext):
             cuda_include = os.path.join(cuda_home, "include")
             cuda_lib = os.path.join(cuda_home, "lib", "x64") if is_windows else os.path.join(cuda_home, "lib64")
 
-            nvcc_flags = [
-                "-O3",
-                "-std=c++17",
-                "-gencode=arch=compute_75,code=sm_75",
-                "-gencode=arch=compute_86,code=sm_86",
-                "-gencode=arch=compute_89,code=sm_89",
-            ]
+            nvcc_flags = ["-O3", "-std=c++17"] + get_gencode_flags()
+            nvcc_flags.append("-Xcompiler=/MD" if is_windows else "-Xcompiler=-fPIC")
 
             # Point nvcc at GCC 13 explicitly — CUDA 12.4 does not support
             # GCC 14 (the manylinux_2_28 default). -allow-unsupported-compiler
@@ -161,8 +213,6 @@ class CUDABuildExtension(build_ext):
             gcc13_path = "/opt/rh/gcc-toolset-13/root/usr/bin/g++"
             if not is_windows and os.path.isfile(gcc13_path):
                 nvcc_flags.append(f"-ccbin={gcc13_path}")
-
-            nvcc_flags.append("-Xcompiler=/MD" if is_windows else "-Xcompiler=-fPIC")
 
         for ext in self.extensions:
             includes = [f"-I{d}" for d in ext.include_dirs]
@@ -220,7 +270,7 @@ aakaar_ext = Extension(
 
 setup(
     name="aakaar",
-    version="0.1.11",
+    version="0.1.12",
     author="Aarav Aggarwal",
     description="A custom standalone ML library featuring CUDA-accelerated operations (CPU fallback supported).",
     packages=["aakaar", "aakaar._openblas_bin"],

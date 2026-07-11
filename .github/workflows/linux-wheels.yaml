@@ -26,7 +26,7 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: >
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
             dnf clean all &&
-            dnf -y install cuda-toolkit-12-4 gcc-toolset-13 openblas-devel
+            dnf -y install cuda-toolkit-12-8 gcc-toolset-13 openblas-devel
 
           # This is the missing piece: make nvcc (and the CUDA libs) visible to the
           # actual build subprocess. CIBW_BEFORE_ALL_LINUX's environment does NOT

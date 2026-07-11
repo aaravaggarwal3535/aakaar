@@ -219,6 +219,13 @@
 * **Python Version:** 3.10, 3.11, 3.12, 3.13, or 3.14
 * **Operating System:** Windows 10/11 (64-bit), Ubuntu 22.04+ LTS (or other manylinux_2_28-compatible Linux distro), or Mac 14+ (Apple Silicon)
 
+### GPU Compatibility
+CUDA-accelerated wheels require an NVIDIA GPU with **Turing architecture (sm_75) or newer** 
+— GeForce RTX 20-series and later, Tesla T4 and later, or any Ampere/Ada/Hopper/Blackwell 
+datacenter GPU. Older GPUs (GTX 10-series/Pascal, Tesla V100/Volta) are not supported by 
+current wheels and will fail at runtime when attempting CUDA operations. Use CPU mode 
+(`device="cpu"`) on unsupported GPUs.
+
 ### GPU Acceleration (Optional, Windows/Linux only)
 
 * **NVIDIA GPU** with a compatible driver installed

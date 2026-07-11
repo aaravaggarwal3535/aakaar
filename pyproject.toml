@@ -4,9 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aakaar"
-version = "0.1.11"
+version = "0.1.12"
 description = "A custom CUDA-accelerated ML library"
 readme = "README.md"
 authors = [{name = "Aarav Aggarwal"}]
 requires-python = ">=3.9"
-dependencies = ["numpy", "nvidia-cuda-runtime", "nvidia-curand", "nvidia-cublas"]
+dependencies = [
+    "numpy",
+    "nvidia-cuda-runtime; sys_platform == 'win32' or sys_platform == 'linux'",
+    "nvidia-curand; sys_platform == 'win32' or sys_platform == 'linux'",
+    "nvidia-cublas; sys_platform == 'win32' or sys_platform == 'linux'",
+]
