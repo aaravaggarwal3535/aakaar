@@ -2,7 +2,7 @@ import os
 import sys
 import contextlib
 
-__version__ = "0.1.9"
+__version__ = "0.1.11"
 
 def _add_windows_cuda_dll_dirs():
     if sys.platform != "win32":

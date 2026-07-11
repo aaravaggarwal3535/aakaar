@@ -8,12 +8,13 @@
 
 #ifndef _WIN32
 #include <dlfcn.h>
+#else
+extern "C" char* openblas_get_config(void);
+extern "C" char* openblas_get_corename(void);
 #endif
 
 std::string get_openblas_diagnostic() {
 #ifdef _WIN32
-    extern "C" char* openblas_get_config(void);
-    extern "C" char* openblas_get_corename(void);
     return std::string("Config: ") + openblas_get_config() + " | Core: " + openblas_get_corename();
 #else
     void* self = dlopen(nullptr, RTLD_NOW);
