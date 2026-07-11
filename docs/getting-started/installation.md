@@ -136,8 +136,8 @@
   const state = { os: 'linux', package: 'pip', python: 'cp310', compute: 'cuda' };
 
   const GITHUB_REPO = "aaravaggarwal3535/aakaar-wheels";
-  const RELEASE_TAG = "v0.1.11";
-  const PKG_VERSION = "0.1.11";
+  const RELEASE_TAG = "v0.1.12";
+  const PKG_VERSION = "0.1.12";
 
   const LINUX_WHEELS = {
     cp310: `aakaar-${PKG_VERSION}-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl`,
@@ -181,7 +181,7 @@
       noteEl.classList.add('visible');
     } else {
       const wheel = LINUX_WHEELS[state.python];
-      codeEl.textContent = `pip install https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}/${wheel}`;
+      codeEl.textContent = `pip install aakaar`;
       noteEl.classList.remove('visible');
     }
   }
@@ -233,4 +233,4 @@ current wheels and will fail at runtime when attempting CUDA operations. Use CPU
 
 If no CUDA installation is detected, aakaar automatically falls back to CPU-only execution. Mac builds are CPU-only (no NVIDIA CUDA support on Apple Silicon).
 
-> **Note:** Linux wheels are hosted outside PyPI due to file size limits, and the download link is pinned to a specific release version. If `v0.1.11` is out of date, check the [releases page](https://github.com/aaravaggarwal3535/aakaar-wheels/releases) for the latest tag.
+> **Note:** Linux wheels are hosted outside PyPI due to file size limits, and the download link is pinned to a specific release version. If `v0.1.12` is out of date, check the [releases page](https://github.com/aaravaggarwal3535/aakaar-wheels/releases) for the latest tag.
