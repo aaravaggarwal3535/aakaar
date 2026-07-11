@@ -1,0 +1,13 @@
+# .github/FUNDING.yml
+
+# Your GitHub username. This will activate once you are approved for GitHub Sponsors.
+github: aaravaggarwal3535
+
+# Your Ko-fi username (swap 'demo_placeholder' with your actual username when ready)
+ko_fi: demo_placeholder
+
+# Custom funding links. We are pointing one to your live documentation support section 
+# and the other directly to your UPI ID for mobile users.
+custom: 
+  - https://aaravaggarwal3535.github.io/aakaar/
+  - upi://pay?pa=aaravaggarwal3535@okicici&pn=Aarav%20Aggarwal&cu=INR
