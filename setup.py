@@ -82,19 +82,76 @@ class CUDABuildExtension(build_ext):
 
         if CUDA_AVAILABLE:
             cuda_home = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME") or "/usr/local/cuda"
-            cuda_include = os.path.join(cuda_home,
+            cuda_include = os.path.join(cuda_home, "include")
+            cuda_lib = os.path.join(cuda_home, "lib", "x64") if is_windows else os.path.join(cuda_home, "lib64")
+
+            nvcc_flags = [
+                "-O3",
+                "-std=c++17",
+                "-gencode=arch=compute_75,code=sm_75",
+                "-gencode=arch=compute_86,code=sm_86",
+                "-gencode=arch=compute_89,code=sm_89",
+            ]
+
+            # Point nvcc at GCC 13 explicitly — CUDA 12.4 does not support
+            # GCC 14 (the manylinux_2_28 default), and -allow-unsupported-compiler
+            # was tried and rejected: it produced genuine compile errors when
+            # nvcc actually parsed GCC 14's headers.
+            gcc13_path = "/opt/rh/gcc-toolset-13/root/usr/bin/g++"
+            if not is_windows and os.path.isfile(gcc13_path):
+                nvcc_flags.append(f"-ccbin={gcc13_path}")
+
+            nvcc_flags.append("-Xcompiler=/MD" if is_windows else "-Xcompiler=-fPIC")
+
+        for ext in self.extensions:
+            includes = [f"-I{d}" for d in ext.include_dirs]
+            includes.append(f"-I{sysconfig.get_path('include')}")
+
+            cu_sources = [s for s in ext.sources if s.endswith(".cu")]
+            cpp_sources = [s for s in ext.sources if s.endswith(".cpp")]
+
+            objects = []
+            if CUDA_AVAILABLE:
+                includes.append(f"-I{cuda_include}")
+                for cu_file in cu_sources:
+                    obj_ext = ".obj" if is_windows else ".o"
+                    obj_file = cu_file.replace(".cu", obj_ext)
+                    nvcc_cmd = ["nvcc", "-c", cu_file, "-o", obj_file] + nvcc_flags + includes
+                    print(f"Compiling CUDA: {' '.join(nvcc_cmd)}")
+                    subprocess.check_call(nvcc_cmd)
+                    objects.append(obj_file)
+                ext.include_dirs.append(cuda_include)
+                ext.library_dirs.append(cuda_lib)
+                ext.libraries.extend(["curand", "cudart", "cublas"])
+            else:
+                print("No nvcc found — building CPU-only extension (no CUDA support).")
+                ext.define_macros.append(("AAKAAR_NO_CUDA", "1"))
+
+            ext.sources = cpp_sources
+            ext.extra_objects = objects
+
+        super().build_extensions()
+
 
 host_compiler_flags = ["/std:c++17"] if sys.platform == "win32" else ["-std=c++17"]
 aakaar_ext = Extension(
     "aakaar._C",
-    sources=["src/bindings.cpp", "src/cpu_kernel.cpp", "src/random_kernel.cu", 'src/matmul_kernel.cu', 'src/elementwise_kernel.cu', 'src/reduction_kernel.cu', 'src/strided_copy_kernel.cu'],
+    sources=[
+        "src/bindings.cpp",
+        "src/cpu_kernel.cpp",
+        "src/random_kernel.cu",
+        "src/matmul_kernel.cu",
+        "src/elementwise_kernel.cu",
+        "src/reduction_kernel.cu",
+        "src/strided_copy_kernel.cu",
+    ],
     include_dirs=[
-    pybind11.get_include(),
-    "src",
-],
+        pybind11.get_include(),
+        "src",
+    ],
     libraries=[],  # populated conditionally above
     language="c++",
-    extra_compile_args=host_compiler_flags
+    extra_compile_args=host_compiler_flags,
 )
 
 setup(
@@ -107,6 +164,6 @@ setup(
     include_package_data=True,
     ext_modules=[aakaar_ext],
     cmdclass={"build_ext": CUDABuildExtension},
-    install_requires=["numpy"],  # nvidia-* deps now conditional, see below
+    install_requires=["numpy"],
     setup_requires=["pybind11"],
 )
