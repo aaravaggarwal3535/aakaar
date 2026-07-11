@@ -15,8 +15,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install OpenBLAS (via Homebrew)
-        run: brew install openblas
+      - name: Install OpenBLAS and libomp (via Homebrew)
+        run: brew install openblas libomp
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.0
@@ -33,4 +33,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-wheels
-          path: ./dist/*.whl
+          path: ./dist/*.whl  

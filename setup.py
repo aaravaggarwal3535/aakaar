@@ -177,8 +177,10 @@ from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 import pybind11
 
+
 def has_nvcc():
     return shutil.which("nvcc") is not None
+
 
 CUDA_AVAILABLE = has_nvcc()
 print(f"CUDA toolkit detected: {CUDA_AVAILABLE}")
@@ -188,7 +190,12 @@ class CUDABuildExtension(build_ext):
     def build_extensions(self):
         is_windows = sys.platform == "win32"
         is_macos = sys.platform == "darwin"
+        is_linux = not is_windows and not is_macos
 
+        # =================================================================
+        # OpenBLAS wiring (platform-specific — cblas.h/lib live in very
+        # different places depending on OS and package manager)
+        # =================================================================
         if is_windows:
             openblas_root = os.environ.get("OPENBLAS_ROOT", r"C:\openblas-prebuilt")
             openblas_include = os.path.join(openblas_root, "include")
@@ -200,30 +207,55 @@ class CUDABuildExtension(build_ext):
                     ext.libraries.append("libopenblas")
             else:
                 print("WARNING: OpenBLAS cblas.h not found at", openblas_include)
+
         elif is_macos:
-            # Homebrew installs OpenBLAS "keg-only" (not symlinked into /usr/local
-            # or /opt/homebrew directly) to avoid clashing with Apple's own
-            # Accelerate BLAS — so cblas.h/lib aren't on the default search path
-            # and must be added explicitly.
-            brew_prefixes = ["/opt/homebrew/opt/openblas", "/usr/local/opt/openblas"]
-            found = None
-            for prefix in brew_prefixes:
+            # OpenBLAS — Homebrew installs it "keg-only" (not symlinked into
+            # /opt/homebrew or /usr/local directly) to avoid clashing with
+            # Apple's own Accelerate BLAS, so paths must be added explicitly.
+            brew_prefixes_blas = ["/opt/homebrew/opt/openblas", "/usr/local/opt/openblas"]
+            found_blas = None
+            for prefix in brew_prefixes_blas:
                 if os.path.isfile(os.path.join(prefix, "include", "cblas.h")):
-                    found = prefix
+                    found_blas = prefix
                     break
-            if found:
+            if found_blas:
                 for ext in self.extensions:
-                    ext.include_dirs.append(os.path.join(found, "include"))
-                    ext.library_dirs.append(os.path.join(found, "lib"))
+                    ext.include_dirs.append(os.path.join(found_blas, "include"))
+                    ext.library_dirs.append(os.path.join(found_blas, "lib"))
                     ext.libraries.append("openblas")
             else:
-                print("WARNING: OpenBLAS not found via Homebrew at", brew_prefixes,
+                print("WARNING: OpenBLAS not found via Homebrew at", brew_prefixes_blas,
                       "— install with `brew install openblas`.")
+
+            # libomp — Apple's clang ships with no OpenMP runtime at all.
+            # Homebrew's libomp provides omp.h and libomp.dylib, but requires
+            # -Xpreprocessor -fopenmp (NOT plain -fopenmp, which is GCC's
+            # flag and unrecognized by Apple clang) plus explicit linking,
+            # since libomp is also keg-only.
+            brew_prefixes_omp = ["/opt/homebrew/opt/libomp", "/usr/local/opt/libomp"]
+            found_omp = None
+            for prefix in brew_prefixes_omp:
+                if os.path.isfile(os.path.join(prefix, "include", "omp.h")):
+                    found_omp = prefix
+                    break
+            if found_omp:
+                for ext in self.extensions:
+                    ext.include_dirs.append(os.path.join(found_omp, "include"))
+                    ext.library_dirs.append(os.path.join(found_omp, "lib"))
+                    ext.libraries.append("omp")
+                    ext.extra_compile_args = list(ext.extra_compile_args or []) + \
+                        ["-Xpreprocessor", "-fopenmp"]
+                    ext.extra_link_args = list(ext.extra_link_args or []) + \
+                        ["-Xpreprocessor", "-fopenmp"]
+            else:
+                print("WARNING: libomp not found via Homebrew at", brew_prefixes_omp,
+                      "— install with `brew install libomp`. "
+                      "If cpu_kernel.cpp unconditionally includes <omp.h>, the build "
+                      "will fail without this; guard that include behind a macro "
+                      "(e.g. AAKAAR_NO_OPENMP) if you need graceful degradation.")
+
         else:
-            # Linux: openblas-devel (installed via CIBW_BEFORE_ALL_LINUX) puts
-            # cblas.h somewhere on the system include path — location varies
-            # by distro packaging, so check several real candidates rather
-            # than assuming one.
+            # Linux
             candidate_includes = [
                 "/usr/include/x86_64-linux-gnu",  # Debian/Ubuntu multiarch layout
                 "/usr/include/openblas",
@@ -237,8 +269,8 @@ class CUDABuildExtension(build_ext):
                     found_include = cand
                     break
 
-            # Belt-and-suspenders: if still not found, ask the package manager
-            # directly where it put the header, rather than guessing further.
+            # Belt-and-suspenders: ask the package manager directly if the
+            # standard candidate paths didn't turn it up.
             if not found_include:
                 for pkg_cmd in (["dpkg", "-L", "libopenblas-dev"], ["rpm", "-ql", "openblas-devel"]):
                     try:
@@ -263,13 +295,20 @@ class CUDABuildExtension(build_ext):
                             if libdir not in ext.library_dirs:
                                 ext.library_dirs.append(libdir)
             else:
-                print("WARNING: OpenBLAS cblas.h not found on Linux — build will fail to link matmul against BLAS.")
+                print("WARNING: OpenBLAS cblas.h not found on Linux — "
+                      "build will fail to link matmul against BLAS.")
 
-            # dlopen/dlsym support, needed on Linux regardless of whether
-            # OpenBLAS was found via the block above.
+            # dlopen/dlsym support (Linux only — not a normal link target on
+            # Windows/macOS).
             for ext in self.extensions:
                 ext.libraries.append("dl")
 
+        # =================================================================
+        # CUDA wiring (Linux/Windows only — CUDA_AVAILABLE is always False
+        # on macOS since there's no nvcc, so this block is naturally skipped
+        # there and AAKAAR_NO_CUDA=1 is set below like any other CPU-only
+        # build)
+        # =================================================================
         if CUDA_AVAILABLE:
             cuda_home = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME") or "/usr/local/cuda"
             cuda_include = os.path.join(cuda_home, "include")
@@ -284,9 +323,11 @@ class CUDABuildExtension(build_ext):
             ]
 
             # Point nvcc at GCC 13 explicitly — CUDA 12.4 does not support
-            # GCC 14 (the manylinux_2_28 default), and -allow-unsupported-compiler
-            # was tried and rejected: it produced genuine compile errors when
-            # nvcc actually parsed GCC 14's headers.
+            # GCC 14 (the manylinux_2_28 default). -allow-unsupported-compiler
+            # was tried first and rejected: forcing nvcc to parse GCC 14's
+            # real headers produced genuine compile errors (std::make_shared
+            # and others), confirming the incompatibility is real, not just
+            # an overcautious version gate.
             gcc13_path = "/opt/rh/gcc-toolset-13/root/usr/bin/g++"
             if not is_windows and os.path.isfile(gcc13_path):
                 nvcc_flags.append(f"-ccbin={gcc13_path}")
@@ -314,6 +355,9 @@ class CUDABuildExtension(build_ext):
                 ext.library_dirs.append(cuda_lib)
                 ext.libraries.extend(["curand", "cudart", "cublas"])
             else:
+                # No CUDA toolkit: skip .cu sources entirely, CPU-only build.
+                # This applies uniformly on Windows-without-CUDA, Linux-without-
+                # CUDA, and always on macOS.
                 print("No nvcc found — building CPU-only extension (no CUDA support).")
                 ext.define_macros.append(("AAKAAR_NO_CUDA", "1"))
 
