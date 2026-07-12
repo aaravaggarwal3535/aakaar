@@ -10,7 +10,8 @@
 namespace py = pybind11;
 
 static bool g_grad_enabled = true;
-
+void set_tf32_enabled(bool enabled);
+bool get_tf32_enabled();
 // ---- Forward declarations: raw ops ----
 void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed);
 std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
@@ -46,6 +47,7 @@ std::string get_openblas_diagnostic();
 #ifndef AAKAAR_NO_CUDA
 #include "allocator.h"
 void run_curand_uniform(std::shared_ptr<Tensor> t, unsigned long long seed);
+void cuda_synchronize();
 std::shared_ptr<Tensor> run_cublas_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cuda_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cuda_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
@@ -1015,6 +1017,9 @@ PYBIND11_MODULE(_C, m) {
     m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");
     m.def("cuda_matmul", &dispatch_matmul, "cuBLAS GPU matrix multiplication");
     m.def("empty_cache", &empty_cache, "Release cached GPU memory");
+    m.def("_set_tf32_enabled", &set_tf32_enabled);
+    m.def("_get_tf32_enabled", &get_tf32_enabled);
+    m.def("_synchronize", &cuda_synchronize);
     m.def("_allocator_stats", []() -> py::tuple {
     auto [hits, misses] = CachingAllocator::get_instance().get_stats();
     return py::make_tuple(hits, misses);

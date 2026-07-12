@@ -17,6 +17,22 @@ private:
     ~CublasManager() { cublasDestroy(handle); }
 };
 
+static bool g_use_tf32 = false;
+
+void set_tf32_enabled(bool enabled) {
+    g_use_tf32 = enabled;
+    cublasMath_t mode = enabled ? CUBLAS_TF32_TENSOR_OP_MATH : CUBLAS_DEFAULT_MATH;
+    cublasSetMathMode(CublasManager::get_instance().handle, mode);
+}
+
+bool get_tf32_enabled() {
+    return g_use_tf32;
+}
+
+void cuda_synchronize() {
+    cudaDeviceSynchronize();
+}
+
 struct NDMatmulPlan {
     std::vector<int> batch_shape;  // broadcast batch shape, e.g. {2,3}
     int total_batch;

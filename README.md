@@ -52,6 +52,21 @@ Every differentiable operation records itself into a dynamic computation graph (
 **Automatic CPU fallback**
 - If no CUDA toolkit is available at install time, Aakaar builds a CPU-only extension automatically. `device="cpu"` works everywhere; `device="cuda"` raises a clear error on CPU-only builds instead of failing to install.
 
+**CUDA synchronization**
+
+Aakaar's CUDA operations execute asynchronously by default (matching PyTorch's
+behavior). Call `aakaar.synchronize()` before timing GPU code or reading
+wall-clock benchmarks, otherwise you'll only measure kernel-launch dispatch
+time, not actual GPU execution time.
+
+**Tensor core acceleration (TF32)**
+
+On Ampere-generation GPUs and newer (RTX 30-series+, A100, H100, RTX 40/50-series),
+`aakaar.set_tf32(True)` enables tensor-core-accelerated matmul via a reduced-precision
+internal format (TF32). This trades a small amount of numerical precision for a
+significant speedup — typically 3-5x for large matmuls. Off by default; tensors
+remain float32 in memory regardless of this setting.
+
 ## Installation
 
 ```bash
@@ -133,6 +148,8 @@ print(f"final loss: {loss.item():.6f}")
 
 If Aakaar helped you learn how autograd architectures work under the hood, or if you want to support independent, dependency-free deep learning infrastructure, consider dropping a tip!
 
-* **International Supporters:** You can buy me a coffee via [Ko-fi (Coming Soon)](#) using any standard international debit/credit card. 
-* **India (UPI):** Since international gateways occasionally restrict domestic transfers, you can support directly via UPI:  
-  aaravaggarwal3535@okicici
+<p align="center">
+  <a href="https://github.com/sponsors/aaravaggarwal3535" target="_blank">
+    <img src="https://img.shields.io/badge/Sponsor-aaravaggarwal3535-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor Aarav">
+  </a>
+</p>

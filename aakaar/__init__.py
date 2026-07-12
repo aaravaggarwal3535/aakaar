@@ -2,7 +2,7 @@ import os
 import sys
 import contextlib
 
-__version__ = "0.1.12"
+__version__ = "0.1.13"
 
 def _add_windows_cuda_dll_dirs():
     if sys.platform != "win32":
@@ -149,3 +149,25 @@ def cross_entropy_from_probs(probs, target_onehot):
     eps = 1e-7
     log_probs = (probs + eps).log()
     return -(target_onehot * log_probs).sum() / probs.shape[0]
+
+def set_tf32(enabled: bool = True):
+    """Enable/disable TF32 tensor-core acceleration for matmul on CUDA (Ampere+ GPUs).
+    Trades a small amount of precision (~10-bit mantissa vs FP32's 23-bit during the
+    internal multiply-accumulate) for a significant speedup. Values remain float32
+    in memory; only the matmul computation path changes. No effect on CPU or on
+    GPUs older than Ampere (sm_80)."""
+    if not _C.HAS_CUDA:
+        return
+    _C._set_tf32_enabled(enabled)
+
+def is_tf32_enabled():
+    return _C._get_tf32_enabled() if _C.HAS_CUDA else False
+
+def synchronize():
+    """Blocks until all queued CUDA operations complete. Call this before
+    timing GPU code, since aakaar's CUDA ops run asynchronously by default —
+    without this, a timer will only measure kernel-launch/dispatch time,
+    not actual GPU execution time."""
+    if _C.HAS_CUDA:
+        _C._synchronize()
+

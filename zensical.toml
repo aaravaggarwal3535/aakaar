@@ -32,7 +32,8 @@ nav = [
       ]},
       { "Hardware & CUDA" = [
           { "is_available" = "concepts/hardware-and-cuda/is_available.md" },
-          { "device_count" = "concepts/hardware-and-cuda/device_count.md" }
+          { "device_count" = "concepts/hardware-and-cuda/device_count.md" },
+          { "Performance & Tuning" = "concepts/hardware-and-cuda/performance.md" }
       ]}
   ]},
   { "API Reference" = [
