@@ -136,8 +136,8 @@
   const state = { os: 'linux', package: 'pip', python: 'cp310', compute: 'cuda' };
 
   const GITHUB_REPO = "aaravaggarwal3535/aakaar-wheels";
-  const RELEASE_TAG = "v0.1.12";
-  const PKG_VERSION = "0.1.12";
+  const RELEASE_TAG = "v0.1.14";
+  const PKG_VERSION = "0.1.14";
 
   const LINUX_WHEELS = {
     cp310: `aakaar-${PKG_VERSION}-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl`,
@@ -181,7 +181,7 @@
       noteEl.classList.add('visible');
     } else {
       const wheel = LINUX_WHEELS[state.python];
-      codeEl.textContent = `pip install aakaar`;
+      codeEl.textContent = `pip install https://github.com/aaravaggarwal3535/aakaar-wheels/releases/download/`+ RELEASE_TAG + "/" + wheel;
       noteEl.classList.remove('visible');
     }
   }
