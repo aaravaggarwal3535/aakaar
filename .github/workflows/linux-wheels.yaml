@@ -27,16 +27,10 @@ jobs:
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
             dnf clean all &&
             dnf -y install cuda-toolkit-12-8 gcc-toolset-13 openblas-devel
-
-          # This is the missing piece: make nvcc (and the CUDA libs) visible to the
-          # actual build subprocess. CIBW_BEFORE_ALL_LINUX's environment does NOT
-          # persist into the wheel-building step — each runs as a separate process,
-          # so PATH must be set here explicitly for setup.py's shutil.which("nvcc")
-          # to find it, and for the linker to find libcudart/libcurand/libcublas.
           CIBW_ENVIRONMENT_LINUX: >
-            PATH=/usr/local/cuda-12.4/bin:$PATH
-            LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
-            CUDA_HOME=/usr/local/cuda-12.4
+            PATH=/usr/local/cuda-12.8/bin:$PATH
+            LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH
+            CUDA_HOME=/usr/local/cuda-12.8
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair -w {dest_dir} {wheel}"
 
       - name: Upload wheels as artifacts
