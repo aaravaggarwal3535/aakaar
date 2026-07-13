@@ -20,7 +20,7 @@ document$.subscribe(function() {
 
     // 2. Setup the Ko-fi Button 
     const kofiLink = document.createElement("a");
-    kofiLink.href = "https://ko-fi.com/demo_placeholder"; // Update when ready
+    kofiLink.href = "https://ko-fi.com/aarav_aggarwal"; // Update when ready
     kofiLink.target = "_blank";
     
     const kofiImg = document.createElement("img");
