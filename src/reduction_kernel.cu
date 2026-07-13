@@ -51,7 +51,7 @@ std::shared_ptr<Tensor> run_cuda_sum_axis(std::shared_ptr<Tensor> a, int dim, bo
     int threads = 256;
     int blocks = (out_size + threads - 1) / threads;
     sum_axis_kernel<<<blocks, threads>>>(
-        a->data_ptr, result->data_ptr, out_size, reduce_size,
+        a->fptr(), result->fptr(), out_size, reduce_size,
         inner_size * reduce_size, inner_size, 1, inner_size
     );
     cudaError_t err = cudaGetLastError();
@@ -66,10 +66,10 @@ std::shared_ptr<Tensor> run_cuda_sum_all(std::shared_ptr<Tensor> a) {
     // Simple approach: copy to host, reduce, copy back. Fine for now; optimize with a
     // proper parallel reduction kernel later if this becomes a hot path.
     std::vector<float> buf(a->size);
-    cudaMemcpy(buf.data(), a->data_ptr, a->size * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(buf.data(), a->fptr(), a->size * sizeof(float), cudaMemcpyDeviceToHost);
     float acc = 0.0f;
     for (float v : buf) acc += v;
-    cudaMemcpy(result->data_ptr, &acc, sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(result->fptr(), &acc, sizeof(float), cudaMemcpyHostToDevice);
     return result;
 }
 
@@ -103,7 +103,7 @@ std::shared_ptr<Tensor> run_cuda_broadcast_axis(std::shared_ptr<Tensor> a, int d
 
     int threads = 256;
     int blocks = (out_size + threads - 1) / threads;
-    broadcast_axis_kernel<<<blocks, threads>>>(a->data_ptr, result->data_ptr, out_size, target_size, 0, inner_size);
+    broadcast_axis_kernel<<<blocks, threads>>>(a->fptr(), result->fptr(), out_size, target_size, 0, inner_size);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
     return result;
@@ -177,7 +177,7 @@ std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cuda_max_axis(std::shar
 
     int threads = 256;
     int blocks = (out_size + threads - 1) / threads;
-    max_axis_kernel<<<blocks, threads>>>(a->data_ptr, result->data_ptr, d_argmax,
+    max_axis_kernel<<<blocks, threads>>>(a->fptr(), result->fptr(), d_argmax,
                                           out_size, reduce_size, inner_size * reduce_size, inner_size);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) { cudaFree(d_argmax); throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err)); }
@@ -201,7 +201,7 @@ std::shared_ptr<Tensor> run_cuda_max_axis_backward(std::shared_ptr<Tensor> grad_
 
     int threads = 256;
     int blocks = (out_size + threads - 1) / threads;
-    max_axis_backward_kernel<<<blocks, threads>>>(grad_out->data_ptr, d_argmax, grad_in->data_ptr,
+    max_axis_backward_kernel<<<blocks, threads>>>(grad_out->fptr(), d_argmax, grad_in->fptr(),
                                                     out_size, reduce_size, inner_size);
     cudaFree(d_argmax);
     return grad_in;

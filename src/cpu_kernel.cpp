@@ -38,7 +38,7 @@ void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed) {
     std::mt19937 gen(seed);
     std::uniform_real_distribution<float> dis(0.0, 1.0);
     for (int i = 0; i < t->size; ++i) {
-        t->data_ptr[i] = dis(gen);
+        t->fptr()[i] = dis(gen);
     }
 }
 
@@ -106,9 +106,9 @@ std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_pt
     };
 
     for (int bi = 0; bi < total_batch; ++bi) {
-        const float* ap = a->data_ptr + compute_offset(bi, a->shape, M*K);
-        const float* bp = b->data_ptr + compute_offset(bi, b->shape, K*N);
-        float* cp = result->data_ptr + bi * M * N;
+        const float* ap = a->fptr() + compute_offset(bi, a->shape, M*K);
+        const float* bp = b->fptr() + compute_offset(bi, b->shape, K*N);
+        float* cp = result->fptr() + bi * M * N;
 
         // Row-major C = A * B, single BLAS call replaces the old triple-nested loop.
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -139,7 +139,7 @@ static std::shared_ptr<Tensor> run_cpu_broadcast_elementwise(std::shared_ptr<Ten
             a_off += ai * pa_strides[d];
             b_off += bi * pb_strides[d];
         }
-        result->data_ptr[flat] = op(a->data_ptr[a_off], b->data_ptr[b_off]);
+        result->fptr()[flat] = op(a->fptr()[a_off], b->fptr()[b_off]);
         for (int d = ndim - 1; d >= 0; --d) {
             if (++idx[d] < out_shape[d]) break;
             idx[d] = 0;
@@ -152,9 +152,9 @@ std::shared_ptr<Tensor> run_cpu_add(std::shared_ptr<Tensor> a, std::shared_ptr<T
     if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x+y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     if (a->is_contiguous() && b->is_contiguous()) {
-        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->data_ptr[i] + b->data_ptr[i];
+        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->fptr()[i] + b->fptr()[i];
     } else {
-        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) + b->get_scalar_flat(i);
+        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) + b->get_scalar_flat(i);
     }
     return result;
 }
@@ -163,9 +163,9 @@ std::shared_ptr<Tensor> run_cpu_sub(std::shared_ptr<Tensor> a, std::shared_ptr<T
     if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x-y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     if (a->is_contiguous() && b->is_contiguous()) {
-        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->data_ptr[i] - b->data_ptr[i];
+        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->fptr()[i] - b->fptr()[i];
     } else {
-        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) - b->get_scalar_flat(i);
+        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) - b->get_scalar_flat(i);
     }
     return result;
 }
@@ -174,9 +174,9 @@ std::shared_ptr<Tensor> run_cpu_mul(std::shared_ptr<Tensor> a, std::shared_ptr<T
     if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x*y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     if (a->is_contiguous() && b->is_contiguous()) {
-        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->data_ptr[i] * b->data_ptr[i];
+        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->fptr()[i] * b->fptr()[i];
     } else {
-        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) * b->get_scalar_flat(i);
+        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) * b->get_scalar_flat(i);
     }
     return result;
 }
@@ -185,34 +185,34 @@ std::shared_ptr<Tensor> run_cpu_div(std::shared_ptr<Tensor> a, std::shared_ptr<T
     if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x/y; });
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     if (a->is_contiguous() && b->is_contiguous()) {
-        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->data_ptr[i] / b->data_ptr[i];
+        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->fptr()[i] / b->fptr()[i];
     } else {
-        for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) / b->get_scalar_flat(i);
+        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) / b->get_scalar_flat(i);
     }
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_add_scalar(std::shared_ptr<Tensor> a, float s) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) + s;
+    for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) + s;
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_sub_scalar(std::shared_ptr<Tensor> a, float s) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) - s;
+    for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) - s;
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_mul_scalar(std::shared_ptr<Tensor> a, float s) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) * s;
+    for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) * s;
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_div_scalar(std::shared_ptr<Tensor> a, float s) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = a->get_scalar_flat(i) / s;
+    for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) / s;
     return result;
 }
 
@@ -242,9 +242,9 @@ std::shared_ptr<Tensor> run_cpu_sum_axis(std::shared_ptr<Tensor> a, int dim, boo
         for (int i = 0; i < inner_size; ++i) {
             float acc = 0.0f;
             for (int r = 0; r < reduce_size; ++r) {
-                acc += a->data_ptr[(o * reduce_size + r) * inner_size + i];
+                acc += a->fptr()[(o * reduce_size + r) * inner_size + i];
             }
-            result->data_ptr[o * inner_size + i] = acc;
+            result->fptr()[o * inner_size + i] = acc;
         }
     }
     return result;
@@ -255,8 +255,8 @@ std::shared_ptr<Tensor> run_cpu_sum_all(std::shared_ptr<Tensor> a) {
         throw std::invalid_argument("sum() requires a contiguous tensor. Call .contiguous() first.");
     auto result = std::make_shared<Tensor>(std::vector<int>{1}, std::string("cpu"));
     float acc = 0.0f;
-    for (int i = 0; i < a->size; ++i) acc += a->data_ptr[i];
-    result->data_ptr[0] = acc;
+    for (int i = 0; i < a->size; ++i) acc += a->fptr()[i];
+    result->fptr()[0] = acc;
     return result;
 }
 
@@ -277,8 +277,8 @@ std::shared_ptr<Tensor> run_cpu_broadcast_axis(std::shared_ptr<Tensor> a, int di
     for (int o = 0; o < outer_size; ++o) {
         for (int t = 0; t < target_size; ++t) {
             for (int i = 0; i < inner_size; ++i) {
-                result->data_ptr[(o * target_size + t) * inner_size + i] =
-                    a->data_ptr[o * inner_size + i];
+                result->fptr()[(o * target_size + t) * inner_size + i] =
+                    a->fptr()[o * inner_size + i];
             }
         }
     }
@@ -289,14 +289,14 @@ std::shared_ptr<Tensor> run_cpu_relu(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     for (int i = 0; i < a->size; ++i) {
         float v = a->get_scalar_flat(i);
-        result->data_ptr[i] = v > 0.0f ? v : 0.0f;
+        result->fptr()[i] = v > 0.0f ? v : 0.0f;
     }
     return result;
 }
 std::shared_ptr<Tensor> run_cpu_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
     auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
     for (int i = 0; i < input->size; ++i) {
-        result->data_ptr[i] = input->get_scalar_flat(i) > 0.0f ? grad_out->data_ptr[i] : 0.0f;
+        result->fptr()[i] = input->get_scalar_flat(i) > 0.0f ? grad_out->fptr()[i] : 0.0f;
     }
     return result;
 }
@@ -304,7 +304,7 @@ std::shared_ptr<Tensor> run_cpu_relu_backward(std::shared_ptr<Tensor> grad_out, 
 std::shared_ptr<Tensor> run_cpu_sigmoid(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     for (int i = 0; i < a->size; ++i) {
-        result->data_ptr[i] = 1.0f / (1.0f + std::exp(-a->get_scalar_flat(i)));
+        result->fptr()[i] = 1.0f / (1.0f + std::exp(-a->get_scalar_flat(i)));
     }
     return result;
 }
@@ -312,14 +312,14 @@ std::shared_ptr<Tensor> run_cpu_sigmoid_backward(std::shared_ptr<Tensor> grad_ou
     auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
     for (int i = 0; i < size; ++i) {
         float s = sig_out_ptr[i];
-        result->data_ptr[i] = grad_out->data_ptr[i] * s * (1.0f - s);
+        result->fptr()[i] = grad_out->fptr()[i] * s * (1.0f - s);
     }
     return result;
 }
 std::shared_ptr<Tensor> run_cpu_tanh(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     for (int i = 0; i < a->size; ++i) {
-        result->data_ptr[i] = std::tanh(a->get_scalar_flat(i));
+        result->fptr()[i] = std::tanh(a->get_scalar_flat(i));
     }
     return result;
 }
@@ -327,7 +327,7 @@ std::shared_ptr<Tensor> run_cpu_tanh_backward(std::shared_ptr<Tensor> grad_out, 
     auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
     for (int i = 0; i < size; ++i) {
         float t = tanh_out_ptr[i];
-        result->data_ptr[i] = grad_out->data_ptr[i] * (1.0f - t * t);
+        result->fptr()[i] = grad_out->fptr()[i] * (1.0f - t * t);
     }
     return result;
 }
@@ -335,7 +335,7 @@ std::shared_ptr<Tensor> run_cpu_leaky_relu(std::shared_ptr<Tensor> a, float slop
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
     for (int i = 0; i < a->size; ++i) {
         float v = a->get_scalar_flat(i);
-        result->data_ptr[i] = v > 0.0f ? v : v * slope;
+        result->fptr()[i] = v > 0.0f ? v : v * slope;
     }
     return result;
 }
@@ -343,30 +343,30 @@ std::shared_ptr<Tensor> run_cpu_leaky_relu_backward(std::shared_ptr<Tensor> grad
     auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
     for (int i = 0; i < input->size; ++i) {
         float x = input->get_scalar_flat(i);
-        result->data_ptr[i] = x > 0.0f ? grad_out->data_ptr[i] : grad_out->data_ptr[i] * slope;
+        result->fptr()[i] = x > 0.0f ? grad_out->fptr()[i] : grad_out->fptr()[i] * slope;
     }
     return result;
 }
 std::shared_ptr<Tensor> run_cpu_exp(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = std::exp(a->get_scalar_flat(i));
+    for (int i = 0; i < a->size; ++i) result->fptr()[i] = std::exp(a->get_scalar_flat(i));
     return result;
 }
 std::shared_ptr<Tensor> run_cpu_exp_backward(std::shared_ptr<Tensor> grad_out, const float* exp_out_ptr, int size, std::vector<int> shape) {
     auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
     for (int i = 0; i < size; ++i) {
-        result->data_ptr[i] = grad_out->data_ptr[i] * exp_out_ptr[i];
+        result->fptr()[i] = grad_out->fptr()[i] * exp_out_ptr[i];
     }
     return result;
 }
 std::shared_ptr<Tensor> run_cpu_log(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->data_ptr[i] = std::log(a->get_scalar_flat(i));
+    for (int i = 0; i < a->size; ++i) result->fptr()[i] = std::log(a->get_scalar_flat(i));
     return result;
 }
 std::shared_ptr<Tensor> run_cpu_log_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
     auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
-    for (int i = 0; i < input->size; ++i) result->data_ptr[i] = grad_out->data_ptr[i] / input->get_scalar_flat(i);
+    for (int i = 0; i < input->size; ++i) result->fptr()[i] = grad_out->fptr()[i] / input->get_scalar_flat(i);
     return result;
 }
 std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
@@ -394,13 +394,13 @@ std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis(std::share
 
     for (int o = 0; o < outer_size; ++o) {
         for (int i = 0; i < inner_size; ++i) {
-            float best = a->data_ptr[(o * reduce_size + 0) * inner_size + i];
+            float best = a->fptr()[(o * reduce_size + 0) * inner_size + i];
             int best_r = 0;
             for (int r = 1; r < reduce_size; ++r) {
-                float v = a->data_ptr[(o * reduce_size + r) * inner_size + i];
+                float v = a->fptr()[(o * reduce_size + r) * inner_size + i];
                 if (v > best) { best = v; best_r = r; }
             }
-            result->data_ptr[o * inner_size + i] = best;
+            result->fptr()[o * inner_size + i] = best;
             argmax[o * inner_size + i] = best_r;
         }
     }
@@ -418,7 +418,7 @@ std::shared_ptr<Tensor> run_cpu_max_axis_backward(std::shared_ptr<Tensor> grad_o
         for (int i = 0; i < inner_size; ++i) {
             int idx = o * inner_size + i;
             int r = argmax[idx];
-            grad_in->data_ptr[(o * reduce_size + r) * inner_size + i] = grad_out->data_ptr[idx];
+            grad_in->fptr()[(o * reduce_size + r) * inner_size + i] = grad_out->fptr()[idx];
         }
     }
     return grad_in;

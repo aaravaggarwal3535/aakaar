@@ -7,6 +7,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
+#include "dtype.h"
 
 #ifndef AAKAAR_NO_CUDA
 #include <cuda_runtime.h>
@@ -14,33 +15,31 @@
 #endif
 
 namespace py = pybind11;
-// Add near the top, after namespace py = pybind11;
+
 class Tensor;
 
 struct Node {
     std::function<std::vector<std::shared_ptr<Tensor>>(std::shared_ptr<Tensor>)> backward_fn;
     std::vector<std::shared_ptr<Tensor>> inputs;
     std::string op_name;
-    bool freed = false;  // set true only when a backward() call with retain_graph=False
-                          // has consumed this node; a later backward() attempt through
-                          // this node then raises a clear error instead of silently
-                          // treating it as a leaf.
+    bool freed = false;
 };
 
 class Tensor : public std::enable_shared_from_this<Tensor> {
 public:
-    float* data_ptr;               // points at the first element THIS tensor/view sees
-    int size;                      // element count of this view
+    void* data_ptr;                // raw buffer; interpret according to `dtype`
+    DType dtype;
+    int size;
     std::vector<int> shape;
-    std::vector<int> strides;      // in elements
+    std::vector<int> strides;      // in elements, not bytes
     std::string device;
-    // Add inside the Tensor class, alongside your other public fields
-    bool requires_grad = false;
-    std::shared_ptr<Tensor> grad;       // populated after .backward()
-    std::shared_ptr<Node> grad_fn;      // null for leaf tensors
 
-    std::shared_ptr<Tensor> base;  // non-null => this is a view; keeps owner alive
-    float* owned_ptr = nullptr;    // the actually-allocated buffer (only if base == nullptr)
+    bool requires_grad = false;
+    std::shared_ptr<Tensor> grad;
+    std::shared_ptr<Node> grad_fn;
+
+    std::shared_ptr<Tensor> base;
+    void* owned_ptr = nullptr;
 
     static std::vector<int> contiguous_strides(const std::vector<int>& shp) {
         std::vector<int> st(shp.size());
@@ -52,42 +51,63 @@ public:
         return st;
     }
 
-    // Fresh allocation (used by rand(), matmul() results, etc.)
-    Tensor(std::vector<int> shp, std::string dev) : shape(shp), device(dev), base(nullptr) {
+    // Fresh allocation. `dt` defaults to FLOAT32 to keep every existing call
+    // site (Tensor(shape, device)) working unchanged during this transition.
+    Tensor(std::vector<int> shp, std::string dev, DType dt = DType::FLOAT32)
+        : shape(shp), device(dev), dtype(dt), base(nullptr) {
         size = 1;
         for (int d : shape) {
             if (d <= 0) throw std::invalid_argument("Tensor dimensions must be positive");
             size *= d;
         }
         strides = contiguous_strides(shape);
+        size_t bytes = (size_t)size * dtype_size(dtype);
+
         if (device == "cuda") {
 #ifdef AAKAAR_NO_CUDA
             throw std::runtime_error("This build of aakaar was compiled without CUDA support. Use device='cpu' instead.");
 #else
-            owned_ptr = CachingAllocator::get_instance().allocate(size);
+            // NOTE: CachingAllocator currently allocates/tracks in units of
+            // float (4 bytes). For FLOAT32 this is exactly right. For other
+            // dtypes in Phase 1 we bypass the cache and go straight to
+            // cudaMalloc/cudaFree — correct but not yet cache-accelerated.
+            // Revisiting the allocator to be byte-based is a natural
+            // follow-up once dtype support is otherwise complete.
+            if (dtype == DType::FLOAT32) {
+                owned_ptr = CachingAllocator::get_instance().allocate(size);
+            } else {
+                void* ptr;
+                cudaError_t err = cudaMalloc(&ptr, bytes);
+                if (err != cudaSuccess) throw std::runtime_error("Aakaar out of memory!");
+                owned_ptr = ptr;
+            }
 #endif
         } else {
-            owned_ptr = new float[size];
+            owned_ptr = ::operator new(bytes);
         }
         data_ptr = owned_ptr;
     }
 
-    // View constructor: shares memory of `parent` at element offset `off`
+    // View constructor: shares memory of `parent` at element offset `off`.
     Tensor(std::shared_ptr<Tensor> parent, int off, std::vector<int> shp, std::vector<int> strd)
-        : shape(shp), strides(strd), device(parent->device), base(parent) {
+        : shape(shp), strides(strd), device(parent->device), dtype(parent->dtype), base(parent) {
         size = 1;
         for (int d : shape) size *= d;
-        data_ptr = parent->data_ptr + off;
+        data_ptr = static_cast<char*>(parent->data_ptr) + (size_t)off * dtype_size(dtype);
     }
 
     ~Tensor() {
-        if (base == nullptr) {   // only owners free memory; views just drop their shared_ptr ref
+        if (base == nullptr) {
             if (device == "cuda") {
 #ifndef AAKAAR_NO_CUDA
-                CachingAllocator::get_instance().free(owned_ptr, size);
+                if (dtype == DType::FLOAT32) {
+                    CachingAllocator::get_instance().free(static_cast<float*>(owned_ptr), size);
+                } else {
+                    cudaFree(owned_ptr);
+                }
 #endif
             } else {
-                delete[] owned_ptr;
+                ::operator delete(owned_ptr);
             }
         }
     }
@@ -96,30 +116,71 @@ public:
         return strides == contiguous_strides(shape);
     }
 
-    // Read a single scalar value at a multi-dimensional index, respecting strides.
+    // --- FLOAT32-only accessors for now; every other dtype throws clearly. ---
+
+    float* fptr() {
+        require_float32(dtype, "this operation");
+        return static_cast<float*>(data_ptr);
+    }
+
     float get_scalar(const std::vector<int>& idx) {
+        require_float32(dtype, "get_scalar");
         int off = 0;
-        for (size_t i = 0; i < idx.size(); ++i) {
-            off += idx[i] * strides[i];
-        }
+        for (size_t i = 0; i < idx.size(); ++i) off += idx[i] * strides[i];
         float value;
 #ifndef AAKAAR_NO_CUDA
         if (device == "cuda") {
-            cudaMemcpy(&value, data_ptr + off, sizeof(float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&value, static_cast<float*>(data_ptr) + off, sizeof(float), cudaMemcpyDeviceToHost);
             return value;
         }
 #endif
-        return data_ptr[off];
+        return static_cast<float*>(data_ptr)[off];
     }
 
-// Add inside the class, near contiguous()
-std::shared_ptr<Tensor> detach() {
-    auto result = std::make_shared<Tensor>(shared_from_this(), 0, shape, strides);
-    result->requires_grad = false;
-    // grad_fn is already null on a freshly constructed Tensor
-    return result;
-}
-// Swap two arbitrary axes (like torch's .transpose(dim0, dim1))
+    void set_scalar(const std::vector<int>& idx, float value) {
+        require_float32(dtype, "set_scalar");
+        int off = 0;
+        for (size_t i = 0; i < idx.size(); ++i) off += idx[i] * strides[i];
+#ifndef AAKAAR_NO_CUDA
+        if (device == "cuda") {
+            cudaMemcpy(static_cast<float*>(data_ptr) + off, &value, sizeof(float), cudaMemcpyHostToDevice);
+            return;
+        }
+#endif
+        static_cast<float*>(data_ptr)[off] = value;
+    }
+
+    float get_scalar_flat(int flat_idx) {
+        require_float32(dtype, "get_scalar_flat");
+        std::vector<int> idx(shape.size());
+        int remaining = flat_idx;
+        for (int d = (int)shape.size() - 1; d >= 0; --d) {
+            idx[d] = remaining % shape[d];
+            remaining /= shape[d];
+        }
+        return get_scalar(idx);
+    }
+
+    void fill_zero() {
+        require_float32(dtype, "fill_zero");
+        size_t bytes = (size_t)size * dtype_size(dtype);
+#ifndef AAKAAR_NO_CUDA
+        if (device == "cuda") {
+            cudaMemset(data_ptr, 0, bytes);
+            return;
+        }
+#endif
+        std::memset(data_ptr, 0, bytes);
+    }
+
+    float item() {
+        require_float32(dtype, "item");
+        if (size != 1)
+            throw std::runtime_error("item() only works on tensors with exactly one element, got size=" + std::to_string(size));
+        std::vector<int> idx(shape.size(), 0);
+        return get_scalar(idx);
+    }
+
     std::shared_ptr<Tensor> transpose(int dim0, int dim1) {
         int ndim = (int)shape.size();
         if (dim0 < 0) dim0 += ndim;
@@ -133,7 +194,6 @@ std::shared_ptr<Tensor> detach() {
         return std::make_shared<Tensor>(shared_from_this(), 0, new_shape, new_strides);
     }
 
-    // Full axis reversal, matching torch's .T semantics for any ndim
     std::shared_ptr<Tensor> transpose_all() {
         int ndim = (int)shape.size();
         std::vector<int> new_shape(ndim), new_strides(ndim);
@@ -144,145 +204,133 @@ std::shared_ptr<Tensor> detach() {
         return std::make_shared<Tensor>(shared_from_this(), 0, new_shape, new_strides);
     }
 
-    // Kept for backward compatibility with existing code that calls transpose2d()
     std::shared_ptr<Tensor> transpose2d() {
         if (shape.size() != 2)
             throw std::invalid_argument("transpose2d() requires a 2D tensor; use transpose(dim0, dim1) for N-D");
         return transpose(0, 1);
     }
 
-void zero_grad() {
-    grad = nullptr;
-}
+    void zero_grad() { grad = nullptr; }
 
-static std::shared_ptr<Tensor> from_buffer(const float* src, std::vector<int> shp, std::string dev) {
-    auto result = std::make_shared<Tensor>(shp, dev);
-#ifndef AAKAAR_NO_CUDA
-    if (dev == "cuda") {
-        cudaMemcpy(result->data_ptr, src, result->size * sizeof(float), cudaMemcpyHostToDevice);
+    std::shared_ptr<Tensor> view(std::vector<int> new_shape) {
+        int new_size = 1;
+        int infer_dim = -1;
+        for (size_t i = 0; i < new_shape.size(); ++i) {
+            if (new_shape[i] == -1) {
+                if (infer_dim != -1) throw std::invalid_argument("Only one dimension can be inferred (-1) in view()");
+                infer_dim = (int)i;
+            } else {
+                if (new_shape[i] <= 0) throw std::invalid_argument("view() dimensions must be positive (or -1 to infer)");
+                new_size *= new_shape[i];
+            }
+        }
+        if (infer_dim != -1) {
+            if (size % new_size != 0) throw std::invalid_argument("view(): inferred dimension does not evenly divide total size");
+            new_shape[infer_dim] = size / new_size;
+            new_size = size;
+        }
+        if (new_size != size)
+            throw std::invalid_argument("view(): new shape's total size (" + std::to_string(new_size) +
+                                         ") must match tensor's size (" + std::to_string(size) + ")");
+        if (!is_contiguous())
+            throw std::invalid_argument("view() requires a contiguous tensor. Use reshape() instead.");
+
+        return std::make_shared<Tensor>(shared_from_this(), 0, new_shape, contiguous_strides(new_shape));
+    }
+    // Builds a fresh tensor and copies `count` floats from `src` into it.
+    // `src` is always a host (CPU) pointer; if `dev` is "cuda", the data is
+    // copied host->device during construction.
+    static std::shared_ptr<Tensor> from_buffer(const float* src, std::vector<int> shp, std::string dev) {
+        auto result = std::make_shared<Tensor>(shp, dev, DType::FLOAT32);
+    #ifndef AAKAAR_NO_CUDA
+        if (dev == "cuda") {
+            cudaMemcpy(result->data_ptr, src, (size_t)result->size * sizeof(float), cudaMemcpyHostToDevice);
+            return result;
+        }
+    #endif
+        std::memcpy(result->data_ptr, src, (size_t)result->size * sizeof(float));
         return result;
     }
-#endif
-    std::memcpy(result->data_ptr, src, result->size * sizeof(float));
-    return result;
-}
-// Strict zero-copy reshape. Fails if the tensor isn't contiguous, matching torch's .view().
-std::shared_ptr<Tensor> view(std::vector<int> new_shape) {
-    int new_size = 1;
-    int infer_dim = -1;
-    for (size_t i = 0; i < new_shape.size(); ++i) {
-        if (new_shape[i] == -1) {
-            if (infer_dim != -1) throw std::invalid_argument("Only one dimension can be inferred (-1) in view()");
-            infer_dim = (int)i;
-        } else {
-            if (new_shape[i] <= 0) throw std::invalid_argument("view() dimensions must be positive (or -1 to infer)");
-            new_size *= new_shape[i];
-        }
+    std::shared_ptr<Tensor> reshape(std::vector<int> new_shape) {
+        if (is_contiguous()) return view(new_shape);
+        return contiguous()->view(new_shape);
     }
-    if (infer_dim != -1) {
-        if (size % new_size != 0) throw std::invalid_argument("view(): inferred dimension does not evenly divide total size");
-        new_shape[infer_dim] = size / new_size;
-        new_size = size;
-    }
-    if (new_size != size)
-        throw std::invalid_argument("view(): new shape's total size (" + std::to_string(new_size) +
-                                     ") must match tensor's size (" + std::to_string(size) + ")");
-    if (!is_contiguous())
-        throw std::invalid_argument("view() requires a contiguous tensor (non-contiguous strides "
-                                     "cannot be reinterpreted as a new shape without copying). "
-                                     "Use reshape() instead, which handles this automatically.");
-
-    return std::make_shared<Tensor>(shared_from_this(), 0, new_shape, contiguous_strides(new_shape));
-}
-
-// Flexible reshape: zero-copy when possible, otherwise makes a contiguous copy first.
-std::shared_ptr<Tensor> reshape(std::vector<int> new_shape) {
-    if (is_contiguous()) {
-        return view(new_shape);
-    }
-    return contiguous()->view(new_shape);
-}
 
     std::shared_ptr<Tensor> contiguous() {
-    if (is_contiguous()) {
-        return shared_from_this();
-    }
-    auto result = std::make_shared<Tensor>(shape, device);
+        require_float32(dtype, "contiguous");
+        if (is_contiguous()) return shared_from_this();
 
-#ifndef AAKAAR_NO_CUDA
-    if (device == "cuda") {
-        extern void run_cuda_strided_gather(const float*, float*, const std::vector<int>&,
-                                             const std::vector<int>&, int);
-        run_cuda_strided_gather(data_ptr, result->data_ptr, shape, strides, size);
-        return result;
-    }
-#endif
+        auto result = std::make_shared<Tensor>(shape, device, dtype);
 
-    // CPU path: direct pointer walk, no cudaMemcpy overhead to worry about
-    std::vector<int> idx(shape.size(), 0);
-    for (int flat = 0; flat < size; ++flat) {
-        result->data_ptr[flat] = get_scalar(idx);
-        for (int d = (int)shape.size() - 1; d >= 0; --d) {
-            if (++idx[d] < shape[d]) break;
-            idx[d] = 0;
-        }
-    }
-    return result;
-}
-
-void copy_(std::shared_ptr<Tensor> other) {
-    if (shape != other->shape)
-        throw std::invalid_argument("copy_(): shape mismatch, self=" + shape_str() +
-                                     " other=" + other->shape_str());
-
-    if (is_contiguous() && other->is_contiguous() && device == other->device) {
 #ifndef AAKAAR_NO_CUDA
         if (device == "cuda") {
-            cudaMemcpy(data_ptr, other->data_ptr, size * sizeof(float), cudaMemcpyDeviceToDevice);
+            extern void run_cuda_strided_gather(const float*, float*, const std::vector<int>&,
+                                                 const std::vector<int>&, int);
+            run_cuda_strided_gather(static_cast<float*>(data_ptr), static_cast<float*>(result->data_ptr), shape, strides, size);
+            return result;
+        }
+#endif
+        std::vector<int> idx(shape.size(), 0);
+        for (int flat = 0; flat < size; ++flat) {
+            static_cast<float*>(result->data_ptr)[flat] = get_scalar(idx);
+            for (int d = (int)shape.size() - 1; d >= 0; --d) {
+                if (++idx[d] < shape[d]) break;
+                idx[d] = 0;
+            }
+        }
+        return result;
+    }
+
+    void copy_(std::shared_ptr<Tensor> other) {
+        require_float32(dtype, "copy_");
+        if (shape != other->shape)
+            throw std::invalid_argument("copy_(): shape mismatch");
+        if (dtype != other->dtype)
+            throw std::invalid_argument("copy_(): dtype mismatch (" + dtype_name(dtype) + " vs " + dtype_name(other->dtype) + ")");
+
+        if (is_contiguous() && other->is_contiguous() && device == other->device) {
+            size_t bytes = (size_t)size * dtype_size(dtype);
+#ifndef AAKAAR_NO_CUDA
+            if (device == "cuda") {
+                cudaMemcpy(data_ptr, other->data_ptr, bytes, cudaMemcpyDeviceToDevice);
+                return;
+            }
+#endif
+            std::memcpy(data_ptr, other->data_ptr, bytes);
             return;
         }
-#endif
-        std::memcpy(data_ptr, other->data_ptr, size * sizeof(float));
-        return;
-    }
 
-    // Slow strided fallback: mismatched contiguity/device, or a genuine strided view.
-    std::vector<int> idx(shape.size(), 0);
-    for (int flat = 0; flat < size; ++flat) {
-        float v = other->get_scalar(idx);
-        set_scalar(idx, v);
-        for (int d = (int)shape.size() - 1; d >= 0; --d) {
-            if (++idx[d] < shape[d]) break;
-            idx[d] = 0;
+        std::vector<int> idx(shape.size(), 0);
+        for (int flat = 0; flat < size; ++flat) {
+            set_scalar(idx, other->get_scalar(idx));
+            for (int d = (int)shape.size() - 1; d >= 0; --d) {
+                if (++idx[d] < shape[d]) break;
+                idx[d] = 0;
+            }
         }
     }
-}
 
     std::shared_ptr<Tensor> to_device(std::string target_device) {
-        if (target_device == device) {
-            return shared_from_this();
-        }
-
+        require_float32(dtype, "to_device");
+        if (target_device == device) return shared_from_this();
 #ifdef AAKAAR_NO_CUDA
-        if (target_device == "cuda") {
-            throw std::runtime_error("This build of aakaar has no CUDA support.");
-        }
+        if (target_device == "cuda") throw std::runtime_error("This build of aakaar has no CUDA support.");
 #endif
-
-        auto result = std::make_shared<Tensor>(shape, target_device);
+        auto result = std::make_shared<Tensor>(shape, target_device, dtype);
 
         if (is_contiguous()) {
+            size_t bytes = (size_t)size * dtype_size(dtype);
 #ifndef AAKAAR_NO_CUDA
             if (device == "cuda" && target_device == "cuda") {
-                cudaMemcpy(result->data_ptr, data_ptr, size * sizeof(float), cudaMemcpyDeviceToDevice);
+                cudaMemcpy(result->data_ptr, data_ptr, bytes, cudaMemcpyDeviceToDevice);
             } else if (device == "cuda" && target_device == "cpu") {
-                cudaMemcpy(result->data_ptr, data_ptr, size * sizeof(float), cudaMemcpyDeviceToHost);
+                cudaMemcpy(result->data_ptr, data_ptr, bytes, cudaMemcpyDeviceToHost);
             } else if (device == "cpu" && target_device == "cuda") {
-                cudaMemcpy(result->data_ptr, data_ptr, size * sizeof(float), cudaMemcpyHostToDevice);
+                cudaMemcpy(result->data_ptr, data_ptr, bytes, cudaMemcpyHostToDevice);
             } else
 #endif
             {
-                std::memcpy(result->data_ptr, data_ptr, size * sizeof(float));
+                std::memcpy(result->data_ptr, data_ptr, bytes);
             }
             return result;
         }
@@ -296,7 +344,6 @@ void copy_(std::shared_ptr<Tensor> other) {
                 idx[d] = 0;
             }
         }
-
 #ifndef AAKAAR_NO_CUDA
         if (target_device == "cuda") {
             cudaMemcpy(result->data_ptr, host_buf.data(), size * sizeof(float), cudaMemcpyHostToDevice);
@@ -307,57 +354,14 @@ void copy_(std::shared_ptr<Tensor> other) {
         return result;
     }
 
-    // Access element at flat logical index i, respecting strides (handles views correctly)
-    float get_scalar_flat(int flat_idx) {
-        std::vector<int> idx(shape.size());
-        int remaining = flat_idx;
-        for (int d = (int)shape.size() - 1; d >= 0; --d) {
-            idx[d] = remaining % shape[d];
-            remaining /= shape[d];
-        }
-        return get_scalar(idx);
-    }
-// ... existing get_scalar and get_scalar_flat ...
-
-    // Write a single scalar value at a multi-dimensional index, respecting strides.
-    void set_scalar(const std::vector<int>& idx, float value) {
-        int off = 0;
-        for (size_t i = 0; i < idx.size(); ++i) {
-            off += idx[i] * strides[i];
-        }
-#ifndef AAKAAR_NO_CUDA
-        if (device == "cuda") {
-            cudaMemcpy(data_ptr + off, &value, sizeof(float), cudaMemcpyHostToDevice);
-            return;
-        }
-#endif
-        data_ptr[off] = value;
+    std::shared_ptr<Tensor> detach() {
+        auto result = std::make_shared<Tensor>(shared_from_this(), 0, shape, strides);
+        result->requires_grad = false;
+        return result;
     }
 
-    // Zero out this tensor's entire buffer.
-    void fill_zero() {
-#ifndef AAKAAR_NO_CUDA
-        if (device == "cuda") {
-            cudaMemset(data_ptr, 0, size * sizeof(float));
-            return;
-        }
-#endif
-        std::memset(data_ptr, 0, size * sizeof(float));
-    }
-
-    // Unwrap a single-element tensor to a plain float.
-    float item() {
-        if (size != 1)
-            throw std::runtime_error(
-                "item() only works on tensors with exactly one element, got size=" +
-                std::to_string(size) + ". Use to_numpy() for multi-element tensors.");
-        std::vector<int> idx(shape.size(), 0);
-        return get_scalar(idx);
-    }
-
-    // ... existing to_numpy() method ...
-    // Correctly handles non-contiguous strided views on both CPU and CUDA
     py::array_t<float> to_numpy() {
+        require_float32(dtype, "to_numpy");
         py::array_t<float> result(shape);
         float* out = result.mutable_data();
 
@@ -376,7 +380,7 @@ void copy_(std::shared_ptr<Tensor> other) {
             throw std::runtime_error("CUDA tensor on a CPU-only build");
 #endif
         } else {
-            src = data_ptr;
+            src = static_cast<float*>(data_ptr);
         }
 
         std::vector<int> idx(shape.size(), 0);
@@ -403,6 +407,10 @@ void copy_(std::shared_ptr<Tensor> other) {
     }
 
     std::string repr() {
+        if (dtype != DType::FLOAT32) {
+            return "aakaar.Tensor(dtype='" + dtype_name(dtype) + "', device='" + device +
+                   "', shape=" + shape_str() + ") [preview unavailable for this dtype yet]";
+        }
         std::string out = "aakaar.Tensor([";
         int preview = size < 6 ? size : 6;
         std::vector<int> idx(shape.size(), 0);

@@ -124,10 +124,10 @@ std::shared_ptr<Tensor> run_cublas_matmul(std::shared_ptr<Tensor> a, std::shared
             handle, CUBLAS_OP_N, CUBLAS_OP_N,
             p.N, p.M, p.K,
             &alpha,
-            b->data_ptr + offB, p.N,
-            a->data_ptr + offA, p.K,
+            b->fptr() + offB, p.N,
+            a->fptr() + offA, p.K,
             &beta,
-            result->data_ptr + offC, p.N
+            result->fptr() + offC, p.N
         );
         if (status != CUBLAS_STATUS_SUCCESS)
             throw std::runtime_error("cuBLAS SGEMM failed at batch index " + std::to_string(bi));

@@ -184,7 +184,7 @@ static std::shared_ptr<Tensor> dispatch_exp(std::shared_ptr<Tensor> a) {
         node->inputs = {a};
         node->op_name = "exp";
         
-        float* out_ptr = result->data_ptr;
+        float* out_ptr = result->fptr();
         int out_size = result->size;
         auto out_shape = result->shape;
         auto out_device = result->device;
@@ -352,7 +352,7 @@ static std::shared_ptr<Tensor> dispatch_sigmoid(std::shared_ptr<Tensor> a) {
         // Capture raw pointer/shape only — NOT `result` itself, which would
         // create a shared_ptr cycle (result->grad_fn->backward_fn->result)
         // that leaks memory forever since refcounting can't collect cycles.
-        float* out_ptr = result->data_ptr;
+        float* out_ptr = result->fptr();
         int out_size = result->size;
         auto out_shape = result->shape;
         auto out_device = result->device;
@@ -382,7 +382,7 @@ static std::shared_ptr<Tensor> dispatch_tanh(std::shared_ptr<Tensor> a) {
         node->inputs = {a};
         node->op_name = "tanh";
         
-        float* out_ptr = result->data_ptr;
+        float* out_ptr = result->fptr();
         int out_size = result->size;
         auto out_shape = result->shape;
         auto out_device = result->device;
@@ -408,11 +408,11 @@ static void tensor_backward(std::shared_ptr<Tensor> root, std::shared_ptr<Tensor
         float one = 1.0f;
 #ifndef AAKAAR_NO_CUDA
         if (root->device == "cuda") {
-            cudaMemcpy(grad_output->data_ptr, &one, sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(grad_output->fptr(), &one, sizeof(float), cudaMemcpyHostToDevice);
         } else
 #endif
         {
-            grad_output->data_ptr[0] = one;
+            grad_output->fptr()[0] = one;
         }
     }
 

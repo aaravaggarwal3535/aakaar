@@ -9,7 +9,7 @@ void run_curand_uniform(std::shared_ptr<Tensor> t, unsigned long long seed) {
     curandGenerator_t generator = CUDARandomManager::get_instance().get_generator(seed);
 
     // Generate random numbers directly into the existing tensor's buffer
-    curandStatus_t status = curandGenerateUniform(generator, t->data_ptr, t->size);
+    curandStatus_t status = curandGenerateUniform(generator, static_cast<float*>(t->fptr()), t->size);
     if (status != CURAND_STATUS_SUCCESS) {
         throw std::runtime_error("cuRAND generation failed");
     }

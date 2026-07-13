@@ -119,9 +119,9 @@ static std::shared_ptr<Tensor> run_cuda_broadcast_elementwise(std::shared_ptr<Te
     
     // Launch kernel with by-value struct
     broadcast_elementwise_kernel<OP><<<blocks, threads>>>(
-        a->data_ptr,
-        b->data_ptr,
-        result->data_ptr, 
+        a->fptr(),
+        b->fptr(),
+        result->fptr(), 
         info, 
         out_size
     );
@@ -239,7 +239,7 @@ static std::shared_ptr<Tensor> run_cuda_elementwise(std::shared_ptr<Tensor> a, s
     check_elementwise_inputs(a, b);
     auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
     int n = a->size;
-    vector_elementwise_vectorized<OP><<<compute_blocks(n), 256>>>(a->data_ptr, b->data_ptr, result->data_ptr, n);
+    vector_elementwise_vectorized<OP><<<compute_blocks(n), 256>>>(a->fptr(), b->fptr(), result->fptr(), n);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
     return result;
@@ -250,7 +250,7 @@ static std::shared_ptr<Tensor> run_cuda_scalar(std::shared_ptr<Tensor> a, float 
     check_scalar_input(a);
     auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
     int n = a->size;
-    scalar_elementwise_vectorized<OP><<<compute_blocks(n), 256>>>(a->data_ptr, scalar, result->data_ptr, n);
+    scalar_elementwise_vectorized<OP><<<compute_blocks(n), 256>>>(a->fptr(), scalar, result->fptr(), n);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
     return result;
@@ -348,19 +348,19 @@ std::shared_ptr<Tensor> run_cuda_relu(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
     int n = a->size;
     if (n == 0) return result;
-    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+    bool can_vec = (n >= 4) && is_aligned16(a->fptr()) && is_aligned16(result->fptr());
     if (can_vec) {
         int n4 = n / 4;
         int tail = n - n4 * 4;
         relu_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(a->data_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), n4);
+            reinterpret_cast<const float4*>(a->fptr()),
+            reinterpret_cast<float4*>(result->fptr()), n4);
         if (tail > 0) {
             relu_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, tail);
+                a->fptr() + n4 * 4, result->fptr() + n4 * 4, tail);
         }
     } else {
-        relu_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
+        relu_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->fptr(), result->fptr(), n);
     }
     return result;
 }
@@ -369,24 +369,24 @@ std::shared_ptr<Tensor> run_cuda_relu_backward(std::shared_ptr<Tensor> grad_out,
     auto result = std::make_shared<Tensor>(input->shape, std::string("cuda"));
     int n = input->size;
     if (n == 0) return result;
-    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
-                            && is_aligned16(input->data_ptr)
-                            && is_aligned16(result->data_ptr);
+    bool can_vec = (n >= 4) && is_aligned16(grad_out->fptr())
+                            && is_aligned16(input->fptr())
+                            && is_aligned16(result->fptr());
     if (can_vec) {
         int n4 = n / 4;
         int tail = n - n4 * 4;
         relu_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(grad_out->data_ptr),
-            reinterpret_cast<const float4*>(input->data_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), n4);
+            reinterpret_cast<const float4*>(grad_out->fptr()),
+            reinterpret_cast<const float4*>(input->fptr()),
+            reinterpret_cast<float4*>(result->fptr()), n4);
         if (tail > 0) {
             relu_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                grad_out->data_ptr + n4 * 4, input->data_ptr + n4 * 4,
-                result->data_ptr + n4 * 4, tail);
+                grad_out->fptr() + n4 * 4, input->fptr() + n4 * 4,
+                result->fptr() + n4 * 4, tail);
         }
     } else {
         relu_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
-            grad_out->data_ptr, input->data_ptr, result->data_ptr, n);
+            grad_out->fptr(), input->fptr(), result->fptr(), n);
     }
     return result;
 }
@@ -450,19 +450,19 @@ std::shared_ptr<Tensor> run_cuda_sigmoid(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
     int n = a->size;
     if (n == 0) return result;
-    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+    bool can_vec = (n >= 4) && is_aligned16(a->fptr()) && is_aligned16(result->fptr());
     if (can_vec) {
         int n4 = n / 4;
         int tail = n - n4 * 4;
         sigmoid_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(a->data_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), n4);
+            reinterpret_cast<const float4*>(a->fptr()),
+            reinterpret_cast<float4*>(result->fptr()), n4);
         if (tail > 0) {
             sigmoid_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, tail);
+                a->fptr() + n4 * 4, result->fptr() + n4 * 4, tail);
         }
     } else {
-        sigmoid_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
+        sigmoid_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->fptr(), result->fptr(), n);
     }
     return result;
 }
@@ -470,20 +470,20 @@ std::shared_ptr<Tensor> run_cuda_sigmoid(std::shared_ptr<Tensor> a) {
 std::shared_ptr<Tensor> run_cuda_sigmoid_backward(std::shared_ptr<Tensor> grad_out, const float* sig_out_ptr, int size, std::vector<int> shape) {
     auto result = std::make_shared<Tensor>(shape, std::string("cuda"));
     if (size == 0) return result;
-    bool can_vec = (size >= 4) && is_aligned16(grad_out->data_ptr) && is_aligned16(sig_out_ptr) && is_aligned16(result->data_ptr);
+    bool can_vec = (size >= 4) && is_aligned16(grad_out->fptr()) && is_aligned16(sig_out_ptr) && is_aligned16(result->fptr());
     if (can_vec) {
         int n4 = size / 4;
         int tail = size - n4 * 4;
         sigmoid_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(grad_out->data_ptr),
+            reinterpret_cast<const float4*>(grad_out->fptr()),
             reinterpret_cast<const float4*>(sig_out_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), n4);
+            reinterpret_cast<float4*>(result->fptr()), n4);
         if (tail > 0) {
             sigmoid_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                grad_out->data_ptr + n4*4, sig_out_ptr + n4*4, result->data_ptr + n4*4, tail);
+                grad_out->fptr() + n4*4, sig_out_ptr + n4*4, result->fptr() + n4*4, tail);
         }
     } else {
-        sigmoid_backward_scalar_kernel<<<elem_blocks(size), 256>>>(grad_out->data_ptr, sig_out_ptr, result->data_ptr, size);
+        sigmoid_backward_scalar_kernel<<<elem_blocks(size), 256>>>(grad_out->fptr(), sig_out_ptr, result->fptr(), size);
     }
     return result;
 }
@@ -546,19 +546,19 @@ std::shared_ptr<Tensor> run_cuda_tanh(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
     int n = a->size;
     if (n == 0) return result;
-    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+    bool can_vec = (n >= 4) && is_aligned16(a->fptr()) && is_aligned16(result->fptr());
     if (can_vec) {
         int n4 = n / 4;
         int tail = n - n4 * 4;
         tanh_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(a->data_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), n4);
+            reinterpret_cast<const float4*>(a->fptr()),
+            reinterpret_cast<float4*>(result->fptr()), n4);
         if (tail > 0) {
             tanh_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, tail);
+                a->fptr() + n4 * 4, result->fptr() + n4 * 4, tail);
         }
     } else {
-        tanh_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
+        tanh_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->fptr(), result->fptr(), n);
     }
     return result;
 }
@@ -567,24 +567,24 @@ std::shared_ptr<Tensor> run_cuda_tanh_backward(std::shared_ptr<Tensor> grad_out,
     auto result = std::make_shared<Tensor>(shape, std::string("cuda"));
     if (size == 0) return result;
     
-    bool can_vec = (size >= 4) && is_aligned16(grad_out->data_ptr)
+    bool can_vec = (size >= 4) && is_aligned16(grad_out->fptr())
                             && is_aligned16(tanh_out_ptr)
-                            && is_aligned16(result->data_ptr);
+                            && is_aligned16(result->fptr());
     if (can_vec) {
         int n4 = size / 4;
         int tail = size - n4 * 4;
         tanh_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(grad_out->data_ptr),
+            reinterpret_cast<const float4*>(grad_out->fptr()),
             reinterpret_cast<const float4*>(tanh_out_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), n4);
+            reinterpret_cast<float4*>(result->fptr()), n4);
         if (tail > 0) {
             tanh_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                grad_out->data_ptr + n4 * 4, tanh_out_ptr + n4 * 4,
-                result->data_ptr + n4 * 4, tail);
+                grad_out->fptr() + n4 * 4, tanh_out_ptr + n4 * 4,
+                result->fptr() + n4 * 4, tail);
         }
     } else {
         tanh_backward_scalar_kernel<<<elem_blocks(size), 256>>>(
-            grad_out->data_ptr, tanh_out_ptr, result->data_ptr, size);
+            grad_out->fptr(), tanh_out_ptr, result->fptr(), size);
     }
     return result;
 }
@@ -656,20 +656,20 @@ std::shared_ptr<Tensor> run_cuda_leaky_relu(std::shared_ptr<Tensor> a, float slo
     int n = a->size;
     if (n == 0) return result;
 
-    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+    bool can_vec = (n >= 4) && is_aligned16(a->fptr()) && is_aligned16(result->fptr());
 
     if (can_vec) {
         int n4 = n / 4;
         int tail = n - n4 * 4;
         leaky_relu_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(a->data_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), slope, n4);
+            reinterpret_cast<const float4*>(a->fptr()),
+            reinterpret_cast<float4*>(result->fptr()), slope, n4);
         if (tail > 0) {
             leaky_relu_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, slope, tail);
+                a->fptr() + n4 * 4, result->fptr() + n4 * 4, slope, tail);
         }
     } else {
-        leaky_relu_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, slope, n);
+        leaky_relu_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->fptr(), result->fptr(), slope, n);
     }
     return result;
 }
@@ -679,25 +679,25 @@ std::shared_ptr<Tensor> run_cuda_leaky_relu_backward(std::shared_ptr<Tensor> gra
     int n = input->size;
     if (n == 0) return result;
 
-    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
-                            && is_aligned16(input->data_ptr)
-                            && is_aligned16(result->data_ptr);
+    bool can_vec = (n >= 4) && is_aligned16(grad_out->fptr())
+                            && is_aligned16(input->fptr())
+                            && is_aligned16(result->fptr());
 
     if (can_vec) {
         int n4 = n / 4;
         int tail = n - n4 * 4;
         leaky_relu_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(grad_out->data_ptr),
-            reinterpret_cast<const float4*>(input->data_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), slope, n4);
+            reinterpret_cast<const float4*>(grad_out->fptr()),
+            reinterpret_cast<const float4*>(input->fptr()),
+            reinterpret_cast<float4*>(result->fptr()), slope, n4);
         if (tail > 0) {
             leaky_relu_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                grad_out->data_ptr + n4 * 4, input->data_ptr + n4 * 4,
-                result->data_ptr + n4 * 4, slope, tail);
+                grad_out->fptr() + n4 * 4, input->fptr() + n4 * 4,
+                result->fptr() + n4 * 4, slope, tail);
         }
     } else {
         leaky_relu_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
-            grad_out->data_ptr, input->data_ptr, result->data_ptr, slope, n);
+            grad_out->fptr(), input->fptr(), result->fptr(), slope, n);
     }
     return result;
 }
@@ -759,20 +759,20 @@ std::shared_ptr<Tensor> run_cuda_exp(std::shared_ptr<Tensor> a) {
     int n = a->size;
     if (n == 0) return result;
 
-    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+    bool can_vec = (n >= 4) && is_aligned16(a->fptr()) && is_aligned16(result->fptr());
 
     if (can_vec) {
         int n4 = n / 4;
         int tail = n - n4 * 4;
         exp_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(a->data_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), n4);
+            reinterpret_cast<const float4*>(a->fptr()),
+            reinterpret_cast<float4*>(result->fptr()), n4);
         if (tail > 0) {
             exp_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, tail);
+                a->fptr() + n4 * 4, result->fptr() + n4 * 4, tail);
         }
     } else {
-        exp_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
+        exp_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->fptr(), result->fptr(), n);
     }
     return result;
 }
@@ -781,25 +781,25 @@ std::shared_ptr<Tensor> run_cuda_exp_backward(std::shared_ptr<Tensor> grad_out, 
     auto result = std::make_shared<Tensor>(shape, std::string("cuda"));
     if (size == 0) return result;
 
-    bool can_vec = (size >= 4) && is_aligned16(grad_out->data_ptr)
+    bool can_vec = (size >= 4) && is_aligned16(grad_out->fptr())
                             && is_aligned16(exp_out_ptr)
-                            && is_aligned16(result->data_ptr);
+                            && is_aligned16(result->fptr());
 
     if (can_vec) {
         int n4 = size / 4;
         int tail = size - n4 * 4;
         exp_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(grad_out->data_ptr),
+            reinterpret_cast<const float4*>(grad_out->fptr()),
             reinterpret_cast<const float4*>(exp_out_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), n4);
+            reinterpret_cast<float4*>(result->fptr()), n4);
         if (tail > 0) {
             exp_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                grad_out->data_ptr + n4 * 4, exp_out_ptr + n4 * 4,
-                result->data_ptr + n4 * 4, tail);
+                grad_out->fptr() + n4 * 4, exp_out_ptr + n4 * 4,
+                result->fptr() + n4 * 4, tail);
         }
     } else {
         exp_backward_scalar_kernel<<<elem_blocks(size), 256>>>(
-            grad_out->data_ptr, exp_out_ptr, result->data_ptr, size);
+            grad_out->fptr(), exp_out_ptr, result->fptr(), size);
     }
     return result;
 }
@@ -861,20 +861,20 @@ std::shared_ptr<Tensor> run_cuda_log(std::shared_ptr<Tensor> a) {
     int n = a->size;
     if (n == 0) return result;
 
-    bool can_vec = (n >= 4) && is_aligned16(a->data_ptr) && is_aligned16(result->data_ptr);
+    bool can_vec = (n >= 4) && is_aligned16(a->fptr()) && is_aligned16(result->fptr());
 
     if (can_vec) {
         int n4 = n / 4;
         int tail = n - n4 * 4;
         log_forward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(a->data_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), n4);
+            reinterpret_cast<const float4*>(a->fptr()),
+            reinterpret_cast<float4*>(result->fptr()), n4);
         if (tail > 0) {
             log_forward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                a->data_ptr + n4 * 4, result->data_ptr + n4 * 4, tail);
+                a->fptr() + n4 * 4, result->fptr() + n4 * 4, tail);
         }
     } else {
-        log_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->data_ptr, result->data_ptr, n);
+        log_forward_scalar_kernel<<<elem_blocks(n), 256>>>(a->fptr(), result->fptr(), n);
     }
     return result;
 }
@@ -884,25 +884,25 @@ std::shared_ptr<Tensor> run_cuda_log_backward(std::shared_ptr<Tensor> grad_out, 
     int n = input->size;
     if (n == 0) return result;
 
-    bool can_vec = (n >= 4) && is_aligned16(grad_out->data_ptr)
-                            && is_aligned16(input->data_ptr)
-                            && is_aligned16(result->data_ptr);
+    bool can_vec = (n >= 4) && is_aligned16(grad_out->fptr())
+                            && is_aligned16(input->fptr())
+                            && is_aligned16(result->fptr());
 
     if (can_vec) {
         int n4 = n / 4;
         int tail = n - n4 * 4;
         log_backward_vec4_kernel<<<elem_blocks(n4), 256>>>(
-            reinterpret_cast<const float4*>(grad_out->data_ptr),
-            reinterpret_cast<const float4*>(input->data_ptr),
-            reinterpret_cast<float4*>(result->data_ptr), n4);
+            reinterpret_cast<const float4*>(grad_out->fptr()),
+            reinterpret_cast<const float4*>(input->fptr()),
+            reinterpret_cast<float4*>(result->fptr()), n4);
         if (tail > 0) {
             log_backward_scalar_kernel<<<elem_blocks(tail), 256>>>(
-                grad_out->data_ptr + n4 * 4, input->data_ptr + n4 * 4,
-                result->data_ptr + n4 * 4, tail);
+                grad_out->fptr() + n4 * 4, input->fptr() + n4 * 4,
+                result->fptr() + n4 * 4, tail);
         }
     } else {
         log_backward_scalar_kernel<<<elem_blocks(n), 256>>>(
-            grad_out->data_ptr, input->data_ptr, result->data_ptr, n);
+            grad_out->fptr(), input->fptr(), result->fptr(), n);
     }
     return result;
 }
