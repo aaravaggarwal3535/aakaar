@@ -257,22 +257,46 @@ public:
     }
 
     std::shared_ptr<Tensor> contiguous() {
-        require_float32(dtype, "contiguous");
-        if (is_contiguous()) return shared_from_this();
+    if (is_contiguous()) return shared_from_this();
 
+    if (dtype != DType::FLOAT32) {
+        // Generic byte-level strided gather: works for any dtype since it
+        // doesn't interpret the data, just moves bytes according to strides
+        // (computed in elements, scaled by dtype_size here).
         auto result = std::make_shared<Tensor>(shape, device, dtype);
+        size_t elem_size = dtype_size(dtype);
 
-#ifndef AAKAAR_NO_CUDA
         if (device == "cuda") {
-            extern void run_cuda_strided_gather(const float*, float*, const std::vector<int>&,
-                                                 const std::vector<int>&, int);
-            run_cuda_strided_gather(static_cast<float*>(data_ptr), static_cast<float*>(result->data_ptr), shape, strides, size);
+#ifndef AAKAAR_NO_CUDA
+            // Fall back to a host round-trip for non-float32 CUDA contiguous()
+            // for now — a dedicated typed strided-gather CUDA kernel (like the
+            // float32 one) is a further optimization, not needed for correctness.
+            std::vector<char> host_buf((size_t)size * elem_size);
+            std::vector<int> idx(shape.size(), 0);
+            for (int flat = 0; flat < size; ++flat) {
+                int off = 0;
+                for (size_t d = 0; d < shape.size(); ++d) off += idx[d] * strides[d];
+                cudaMemcpy(host_buf.data() + (size_t)flat * elem_size,
+                           static_cast<char*>(data_ptr) + (size_t)off * elem_size,
+                           elem_size, cudaMemcpyDeviceToHost);
+                for (int d = (int)shape.size() - 1; d >= 0; --d) {
+                    if (++idx[d] < shape[d]) break;
+                    idx[d] = 0;
+                }
+            }
+            cudaMemcpy(result->data_ptr, host_buf.data(), (size_t)size * elem_size, cudaMemcpyHostToDevice);
             return result;
-        }
 #endif
+        }
+
+        // CPU path: direct byte copy per element according to strides.
         std::vector<int> idx(shape.size(), 0);
         for (int flat = 0; flat < size; ++flat) {
-            static_cast<float*>(result->data_ptr)[flat] = get_scalar(idx);
+            int off = 0;
+            for (size_t d = 0; d < shape.size(); ++d) off += idx[d] * strides[d];
+            std::memcpy(static_cast<char*>(result->data_ptr) + (size_t)flat * elem_size,
+                        static_cast<char*>(data_ptr) + (size_t)off * elem_size,
+                        elem_size);
             for (int d = (int)shape.size() - 1; d >= 0; --d) {
                 if (++idx[d] < shape[d]) break;
                 idx[d] = 0;
@@ -281,46 +305,72 @@ public:
         return result;
     }
 
-    void copy_(std::shared_ptr<Tensor> other) {
-        require_float32(dtype, "copy_");
-        if (shape != other->shape)
-            throw std::invalid_argument("copy_(): shape mismatch");
-        if (dtype != other->dtype)
-            throw std::invalid_argument("copy_(): dtype mismatch (" + dtype_name(dtype) + " vs " + dtype_name(other->dtype) + ")");
-
-        if (is_contiguous() && other->is_contiguous() && device == other->device) {
-            size_t bytes = (size_t)size * dtype_size(dtype);
+    // Existing float32 fast path (GPU strided-gather kernel), unchanged.
+    auto result = std::make_shared<Tensor>(shape, device, dtype);
 #ifndef AAKAAR_NO_CUDA
-            if (device == "cuda") {
-                cudaMemcpy(data_ptr, other->data_ptr, bytes, cudaMemcpyDeviceToDevice);
-                return;
-            }
+    if (device == "cuda") {
+        extern void run_cuda_strided_gather(const float*, float*, const std::vector<int>&,
+                                             const std::vector<int>&, int);
+        run_cuda_strided_gather(static_cast<float*>(data_ptr), static_cast<float*>(result->data_ptr), shape, strides, size);
+        return result;
+    }
 #endif
-            std::memcpy(data_ptr, other->data_ptr, bytes);
-            return;
-        }
-
-        std::vector<int> idx(shape.size(), 0);
-        for (int flat = 0; flat < size; ++flat) {
-            set_scalar(idx, other->get_scalar(idx));
-            for (int d = (int)shape.size() - 1; d >= 0; --d) {
-                if (++idx[d] < shape[d]) break;
-                idx[d] = 0;
-            }
+    std::vector<int> idx(shape.size(), 0);
+    for (int flat = 0; flat < size; ++flat) {
+        static_cast<float*>(result->data_ptr)[flat] = get_scalar(idx);
+        for (int d = (int)shape.size() - 1; d >= 0; --d) {
+            if (++idx[d] < shape[d]) break;
+            idx[d] = 0;
         }
     }
+    return result;
+}
+
+    void copy_(std::shared_ptr<Tensor> other) {
+    if (shape != other->shape)
+        throw std::invalid_argument("copy_(): shape mismatch");
+    if (dtype != other->dtype)
+        throw std::invalid_argument("copy_(): dtype mismatch (" + dtype_name(dtype) + " vs " + dtype_name(other->dtype) + ")");
+
+    size_t elem_size = dtype_size(dtype);
+
+    if (is_contiguous() && other->is_contiguous() && device == other->device) {
+        size_t bytes = (size_t)size * elem_size;
+#ifndef AAKAAR_NO_CUDA
+        if (device == "cuda") {
+            cudaMemcpy(data_ptr, other->data_ptr, bytes, cudaMemcpyDeviceToDevice);
+            return;
+        }
+#endif
+        std::memcpy(data_ptr, other->data_ptr, bytes);
+        return;
+    }
+
+    if (dtype != DType::FLOAT32)
+        throw std::runtime_error("copy_() between non-contiguous tensors is not yet supported for dtype '" +
+                                  dtype_name(dtype) + "'. Call .contiguous() on both tensors first.");
+
+    std::vector<int> idx(shape.size(), 0);
+    for (int flat = 0; flat < size; ++flat) {
+        set_scalar(idx, other->get_scalar(idx));
+        for (int d = (int)shape.size() - 1; d >= 0; --d) {
+            if (++idx[d] < shape[d]) break;
+            idx[d] = 0;
+        }
+    }
+}
 
     std::shared_ptr<Tensor> to_device(std::string target_device) {
-        require_float32(dtype, "to_device");
         if (target_device == device) return shared_from_this();
-#ifdef AAKAAR_NO_CUDA
+    #ifdef AAKAAR_NO_CUDA
         if (target_device == "cuda") throw std::runtime_error("This build of aakaar has no CUDA support.");
-#endif
+    #endif
         auto result = std::make_shared<Tensor>(shape, target_device, dtype);
+        size_t elem_size = dtype_size(dtype);
 
         if (is_contiguous()) {
-            size_t bytes = (size_t)size * dtype_size(dtype);
-#ifndef AAKAAR_NO_CUDA
+            size_t bytes = (size_t)size * elem_size;
+    #ifndef AAKAAR_NO_CUDA
             if (device == "cuda" && target_device == "cuda") {
                 cudaMemcpy(result->data_ptr, data_ptr, bytes, cudaMemcpyDeviceToDevice);
             } else if (device == "cuda" && target_device == "cpu") {
@@ -328,12 +378,17 @@ public:
             } else if (device == "cpu" && target_device == "cuda") {
                 cudaMemcpy(result->data_ptr, data_ptr, bytes, cudaMemcpyHostToDevice);
             } else
-#endif
+    #endif
             {
                 std::memcpy(result->data_ptr, data_ptr, bytes);
             }
             return result;
         }
+
+        // Non-contiguous fallback: only float32 has a working strided element-by-element
+        // path today (get_scalar/set_scalar are float32-only per Step 1's design).
+        // Other dtypes must be made contiguous first before crossing devices.
+        require_float32(dtype, "to_device (on a non-contiguous tensor)");
 
         std::vector<float> host_buf(size);
         std::vector<int> idx(shape.size(), 0);
@@ -344,12 +399,12 @@ public:
                 idx[d] = 0;
             }
         }
-#ifndef AAKAAR_NO_CUDA
+    #ifndef AAKAAR_NO_CUDA
         if (target_device == "cuda") {
             cudaMemcpy(result->data_ptr, host_buf.data(), size * sizeof(float), cudaMemcpyHostToDevice);
             return result;
         }
-#endif
+    #endif
         std::memcpy(result->data_ptr, host_buf.data(), size * sizeof(float));
         return result;
     }
