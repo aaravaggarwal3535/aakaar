@@ -14,11 +14,16 @@ void set_tf32_enabled(bool enabled);
 bool get_tf32_enabled();
 // ---- Forward declarations: raw ops ----
 void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed);
+void fill_cpu_randint(std::shared_ptr<Tensor> t, long long low, long long high, unsigned long long seed);
 std::shared_ptr<Tensor> run_cpu_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cpu_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cpu_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cpu_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cpu_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+std::shared_ptr<Tensor> run_cpu_add_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+std::shared_ptr<Tensor> run_cpu_sub_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+std::shared_ptr<Tensor> run_cpu_mul_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+std::shared_ptr<Tensor> run_cpu_div_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cpu_add_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cpu_sub_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cpu_mul_scalar(std::shared_ptr<Tensor> a, float s);
@@ -47,12 +52,17 @@ std::string get_openblas_diagnostic();
 #ifndef AAKAAR_NO_CUDA
 #include "allocator.h"
 void run_curand_uniform(std::shared_ptr<Tensor> t, unsigned long long seed);
+void run_curand_randint(std::shared_ptr<Tensor> t, long long low, long long high, unsigned long long seed);
 void cuda_synchronize();
 std::shared_ptr<Tensor> run_cublas_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cuda_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cuda_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cuda_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cuda_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+std::shared_ptr<Tensor> run_cuda_add_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+std::shared_ptr<Tensor> run_cuda_sub_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+std::shared_ptr<Tensor> run_cuda_mul_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+std::shared_ptr<Tensor> run_cuda_div_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 std::shared_ptr<Tensor> run_cuda_add_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cuda_sub_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cuda_mul_scalar(std::shared_ptr<Tensor> a, float s);
@@ -609,6 +619,16 @@ static std::shared_ptr<Tensor> reduce_grad_to_shape(std::shared_ptr<Tensor> grad
 }
 
 static std::shared_ptr<Tensor> dispatch_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && (a->requires_grad || b->requires_grad))
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_add_typed(a, b);
+#endif
+        return run_cpu_add_typed(a, b);
+    }
+
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
     if (a->device == "cuda") result = run_cuda_add(a, b);
@@ -634,6 +654,16 @@ static std::shared_ptr<Tensor> dispatch_add(std::shared_ptr<Tensor> a, std::shar
 }
 
 static std::shared_ptr<Tensor> dispatch_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && (a->requires_grad || b->requires_grad))
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_sub_typed(a, b);
+#endif
+        return run_cpu_sub_typed(a, b);
+    }
+
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
     if (a->device == "cuda") result = run_cuda_sub(a, b);
@@ -660,6 +690,16 @@ static std::shared_ptr<Tensor> dispatch_sub(std::shared_ptr<Tensor> a, std::shar
 }
 
 static std::shared_ptr<Tensor> dispatch_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && (a->requires_grad || b->requires_grad))
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_mul_typed(a, b);
+#endif
+        return run_cpu_mul_typed(a, b);
+    }
+
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
     if (a->device == "cuda") result = run_cuda_mul(a, b);
@@ -673,8 +713,6 @@ static std::shared_ptr<Tensor> dispatch_mul(std::shared_ptr<Tensor> a, std::shar
         node->inputs = {a, b};
         node->op_name = "mul";
         node->backward_fn = [a, b](std::shared_ptr<Tensor> grad_out) {
-            // grad_out * b (or a) is computed at the OUTPUT's (broadcasted) shape,
-            // then reduced back down to a's (or b's) original shape.
             auto da_full = dispatch_mul(grad_out, b);
             auto db_full = dispatch_mul(grad_out, a);
             auto da = reduce_grad_to_shape(da_full, a->shape);
@@ -687,6 +725,16 @@ static std::shared_ptr<Tensor> dispatch_mul(std::shared_ptr<Tensor> a, std::shar
 }
 
 static std::shared_ptr<Tensor> dispatch_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && (a->requires_grad || b->requires_grad))
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_div_typed(a, b);
+#endif
+        return run_cpu_div_typed(a, b);
+    }
+
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
     if (a->device == "cuda") result = run_cuda_div(a, b);
@@ -762,8 +810,16 @@ static std::shared_ptr<Tensor> tensor_from_numpy(py::array_t<float, py::array::c
 // ---- Module definition ----
 
 PYBIND11_MODULE(_C, m) {
+    py::enum_<DType>(m, "DType")
+        .value("float32", DType::FLOAT32)
+        .value("float64", DType::FLOAT64)
+        .value("int32", DType::INT32)
+        .value("int64", DType::INT64);
+
     py::class_<Tensor, std::shared_ptr<Tensor>>(m, "Tensor")
         .def(py::init<std::vector<int>, std::string>())
+        .def(py::init<std::vector<int>, std::string, DType>())  
+        .def_property_readonly("dtype", [](Tensor &t) { return dtype_name(t.dtype); })
         .def_readonly("device", &Tensor::device)
         .def_readonly("size", &Tensor::size)
         .def_readonly("shape", &Tensor::shape)
@@ -782,24 +838,38 @@ PYBIND11_MODULE(_C, m) {
         }, py::arg("dim"), py::arg("keepdim") = false)
         .def("__neg__", [](std::shared_ptr<Tensor> a) { return dispatch_mul_scalar(a, -1.0f); })
         .def("contiguous", [](std::shared_ptr<Tensor> self) { return dispatch_contiguous(self); })
-.def("to", [](std::shared_ptr<Tensor> self, std::string target_device) {
-    auto result = self->to_device(target_device);
-    if (g_grad_enabled && self->requires_grad && result.get() != self.get()) {
-        result->requires_grad = true;
-        auto node = std::make_shared<Node>();
-        node->inputs = {self};
-        node->op_name = "to_device";
-        auto origin_device = self->device;
-        node->backward_fn = [origin_device](std::shared_ptr<Tensor> grad_out) {
-            auto grad_input = grad_out->to_device(origin_device);
-            return std::vector<std::shared_ptr<Tensor>>{grad_input};
-        };
-        result->grad_fn = node;
-    }
-    return result;
-}, py::arg("target_device"))
-
-        .def("to", &Tensor::to_device)
+        .def("to", [](std::shared_ptr<Tensor> self, std::string target_device) {
+            auto result = self->to_device(target_device);
+            if (g_grad_enabled && self->requires_grad && result.get() != self.get()) {
+                result->requires_grad = true;
+                auto node = std::make_shared<Node>();
+                node->inputs = {self};
+                node->op_name = "to_device";
+                auto origin_device = self->device;
+                node->backward_fn = [origin_device](std::shared_ptr<Tensor> grad_out) {
+                    auto grad_input = grad_out->to_device(origin_device);
+                    return std::vector<std::shared_ptr<Tensor>>{grad_input};
+                };
+                result->grad_fn = node;
+            }
+            return result;
+        }, py::arg("target_device"))
+        .def("to_device", [](std::shared_ptr<Tensor> self, std::string target_device) {
+            auto result = self->to_device(target_device);
+            if (g_grad_enabled && self->requires_grad && result.get() != self.get()) {
+                result->requires_grad = true;
+                auto node = std::make_shared<Node>();
+                node->inputs = {self};
+                node->op_name = "to_device";
+                auto origin_device = self->device;
+                node->backward_fn = [origin_device](std::shared_ptr<Tensor> grad_out) {
+                    auto grad_input = grad_out->to_device(origin_device);
+                    return std::vector<std::shared_ptr<Tensor>>{grad_input};
+                };
+                result->grad_fn = node;
+            }
+            return result;
+        }, py::arg("target_device"))
         .def("transpose", [](std::shared_ptr<Tensor> self, int dim0, int dim1) {
             auto result = self->transpose(dim0, dim1);
             if (g_grad_enabled && self->requires_grad) {
@@ -987,6 +1057,7 @@ PYBIND11_MODULE(_C, m) {
 
     return py::cast(result);
 })
+        
         .def("__add__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_add(a, b); })
         .def("__add__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_add_scalar(a, s); })
         .def("__radd__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_add_scalar(a, s); })
@@ -1003,6 +1074,7 @@ PYBIND11_MODULE(_C, m) {
     m.def("_is_grad_enabled", []() { return g_grad_enabled; });
 
     m.def("fill_cpu_random", &fill_cpu_random, "Fill CPU Tensor with random numbers");
+    m.def("fill_cpu_randint", &fill_cpu_randint, "Fill CPU Tensor with random integers");
     m.def("cpu_matmul", &dispatch_matmul, "CPU matrix multiplication (autograd-aware)");
     m.def("cpu_add", &dispatch_add);
     m.def("cpu_sub", &dispatch_sub);
@@ -1015,6 +1087,7 @@ PYBIND11_MODULE(_C, m) {
     
     #ifndef AAKAAR_NO_CUDA
     m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");
+    m.def("generate_randint", &run_curand_randint);
     m.def("cuda_matmul", &dispatch_matmul, "cuBLAS GPU matrix multiplication");
     m.def("empty_cache", &empty_cache, "Release cached GPU memory");
     m.def("_set_tf32_enabled", &set_tf32_enabled);

@@ -2,7 +2,7 @@ import os
 import sys
 import contextlib
 
-__version__ = "0.1.14"
+__version__ = "0.2.0"
 
 def _add_windows_cuda_dll_dirs():
     if sys.platform != "win32":
@@ -46,19 +46,35 @@ def _normalize_shape(size):
         return [size]
     return list(size)
 
-def rand(size, device: str = "cpu", seed: int = 42, requires_grad: bool = False):
+def rand(size, device: str = "cpu", seed: int = 42, requires_grad: bool = False, dtype: str = "float32"):
     if device == "cuda" and not _C.HAS_CUDA:
         raise RuntimeError(
             "This installation of aakaar was built without CUDA support. "
             "Install on a machine with the CUDA toolkit available, or use device='cpu'."
         )
     shape = _normalize_shape(size)
-    t = _C.Tensor(shape, device)
+    dt = getattr(_C.DType, dtype)
+    t = _C.Tensor(shape, device, dt)
     if device == "cuda":
         _C.generate_random(t, seed)
     else:
         _C.fill_cpu_random(t, seed)
     t.requires_grad = requires_grad
+    return t
+
+def randint(size, low, high, device: str = "cpu", seed: int = 42, dtype: str = "int32"):
+    if device == "cuda" and not _C.HAS_CUDA:
+        raise RuntimeError(
+            "This installation of aakaar was built without CUDA support. "
+            "Install on a machine with the CUDA toolkit available, or use device='cpu'."
+        )
+    shape = _normalize_shape(size)
+    dt = getattr(_C.DType, dtype)
+    t = _C.Tensor(shape, device, dt)
+    if device == "cuda":
+        _C.generate_randint(t, low, high, seed)
+    else:
+        _C.fill_cpu_randint(t, low, high, seed)
     return t
 
 def matmul(a, b):

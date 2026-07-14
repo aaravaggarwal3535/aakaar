@@ -360,27 +360,27 @@ public:
         return result;
     }
 
-    py::array_t<float> to_numpy() {
-        require_float32(dtype, "to_numpy");
-        py::array_t<float> result(shape);
-        float* out = result.mutable_data();
+    template <typename T>
+    py::array_t<T> to_numpy_typed() {
+        py::array_t<T> result(shape);
+        T* out = result.mutable_data();
 
-        std::vector<float> host_buf;
-        const float* src;
+        std::vector<T> host_buf;
+        const T* src;
 
         if (device == "cuda") {
-#ifndef AAKAAR_NO_CUDA
+    #ifndef AAKAAR_NO_CUDA
             int max_off = 0;
             for (size_t i = 0; i < shape.size(); ++i)
                 if (shape[i] > 0) max_off += (shape[i] - 1) * strides[i];
             host_buf.resize(max_off + 1);
-            cudaMemcpy(host_buf.data(), data_ptr, (max_off + 1) * sizeof(float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(host_buf.data(), data_ptr, (size_t)(max_off + 1) * sizeof(T), cudaMemcpyDeviceToHost);
             src = host_buf.data();
-#else
+    #else
             throw std::runtime_error("CUDA tensor on a CPU-only build");
-#endif
+    #endif
         } else {
-            src = static_cast<float*>(data_ptr);
+            src = static_cast<T*>(data_ptr);
         }
 
         std::vector<int> idx(shape.size(), 0);
@@ -394,6 +394,16 @@ public:
             }
         }
         return result;
+    }
+
+    py::object to_numpy() {
+        switch (dtype) {
+            case DType::FLOAT32: return to_numpy_typed<float>();
+            case DType::FLOAT64: return to_numpy_typed<double>();
+            case DType::INT32:   return to_numpy_typed<int32_t>();
+            case DType::INT64:   return to_numpy_typed<int64_t>();
+        }
+        throw std::runtime_error("Unknown dtype");
     }
 
     std::string shape_str() const {

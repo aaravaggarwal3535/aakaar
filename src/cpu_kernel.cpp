@@ -36,9 +36,41 @@ std::string get_openblas_diagnostic() {
 
 void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed) {
     std::mt19937 gen(seed);
-    std::uniform_real_distribution<float> dis(0.0, 1.0);
-    for (int i = 0; i < t->size; ++i) {
-        t->fptr()[i] = dis(gen);
+    switch (t->dtype) {
+        case DType::FLOAT32: {
+            std::uniform_real_distribution<float> dis(0.0f, 1.0f);
+            float* ptr = static_cast<float*>(t->data_ptr);
+            for (int i = 0; i < t->size; ++i) ptr[i] = dis(gen);
+            break;
+        }
+        case DType::FLOAT64: {
+            std::uniform_real_distribution<double> dis(0.0, 1.0);
+            double* ptr = static_cast<double*>(t->data_ptr);
+            for (int i = 0; i < t->size; ++i) ptr[i] = dis(gen);
+            break;
+        }
+        default:
+            throw std::runtime_error("rand() only supports float32/float64 dtypes. Use randint() for integer types.");
+    }
+}
+
+void fill_cpu_randint(std::shared_ptr<Tensor> t, long long low, long long high, unsigned long long seed) {
+    std::mt19937 gen(seed);
+    switch (t->dtype) {
+        case DType::INT32: {
+            std::uniform_int_distribution<int32_t> dis((int32_t)low, (int32_t)(high - 1));
+            int32_t* ptr = static_cast<int32_t*>(t->data_ptr);
+            for (int i = 0; i < t->size; ++i) ptr[i] = dis(gen);
+            break;
+        }
+        case DType::INT64: {
+            std::uniform_int_distribution<int64_t> dis(low, high - 1);
+            int64_t* ptr = static_cast<int64_t*>(t->data_ptr);
+            for (int i = 0; i < t->size; ++i) ptr[i] = dis(gen);
+            break;
+        }
+        default:
+            throw std::runtime_error("randint() only supports int32/int64 dtypes.");
     }
 }
 
@@ -422,4 +454,49 @@ std::shared_ptr<Tensor> run_cpu_max_axis_backward(std::shared_ptr<Tensor> grad_o
         }
     }
     return grad_in;
+}
+
+template <typename T, typename F>
+static std::shared_ptr<Tensor> run_cpu_elementwise_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b, F op) {
+    if (a->shape != b->shape)
+        throw std::invalid_argument("Broadcasting is not yet supported for non-float32 dtypes.");
+    auto result = std::make_shared<Tensor>(a->shape, a->device, a->dtype);
+    T* ap = static_cast<T*>(a->data_ptr);
+    T* bp = static_cast<T*>(b->data_ptr);
+    T* rp = static_cast<T*>(result->data_ptr);
+    for (int i = 0; i < a->size; ++i) rp[i] = op(ap[i], bp[i]);
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_add_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_elementwise_typed<double>(a, b, [](double x, double y){ return x+y; });
+        case DType::INT32:   return run_cpu_elementwise_typed<int32_t>(a, b, [](int32_t x, int32_t y){ return x+y; });
+        case DType::INT64:   return run_cpu_elementwise_typed<int64_t>(a, b, [](int64_t x, int64_t y){ return x+y; });
+        default: throw std::runtime_error("add(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+std::shared_ptr<Tensor> run_cpu_sub_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_elementwise_typed<double>(a, b, [](double x, double y){ return x-y; });
+        case DType::INT32:   return run_cpu_elementwise_typed<int32_t>(a, b, [](int32_t x, int32_t y){ return x-y; });
+        case DType::INT64:   return run_cpu_elementwise_typed<int64_t>(a, b, [](int64_t x, int64_t y){ return x-y; });
+        default: throw std::runtime_error("sub(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+std::shared_ptr<Tensor> run_cpu_mul_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_elementwise_typed<double>(a, b, [](double x, double y){ return x*y; });
+        case DType::INT32:   return run_cpu_elementwise_typed<int32_t>(a, b, [](int32_t x, int32_t y){ return x*y; });
+        case DType::INT64:   return run_cpu_elementwise_typed<int64_t>(a, b, [](int64_t x, int64_t y){ return x*y; });
+        default: throw std::runtime_error("mul(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+std::shared_ptr<Tensor> run_cpu_div_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_elementwise_typed<double>(a, b, [](double x, double y){ return x/y; });
+        case DType::INT32:   return run_cpu_elementwise_typed<int32_t>(a, b, [](int32_t x, int32_t y){ return x/y; });
+        case DType::INT64:   return run_cpu_elementwise_typed<int64_t>(a, b, [](int64_t x, int64_t y){ return x/y; });
+        default: throw std::runtime_error("div(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
 }

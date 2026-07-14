@@ -906,3 +906,4 @@ std::shared_ptr<Tensor> run_cuda_log_backward(std::shared_ptr<Tensor> grad_out, 
     }
     return result;
 }
+
