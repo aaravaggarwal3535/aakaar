@@ -500,3 +500,332 @@ std::shared_ptr<Tensor> run_cpu_div_typed(std::shared_ptr<Tensor> a, std::shared
         default: throw std::runtime_error("div(): unsupported dtype '" + dtype_name(a->dtype) + "'");
     }
 }
+
+// ---- Typed sum_axis / sum_all ----
+// torch-style promotion: int32/int64 always accumulate into int64 to reduce
+// overflow risk (matches torch.sum's default integer promotion). float32/
+// float64 keep their own width — no promotion for floats.
+
+static DType sum_result_dtype(DType in) {
+    switch (in) {
+        case DType::INT32:
+        case DType::INT64:
+            return DType::INT64;
+        case DType::FLOAT32:
+            return DType::FLOAT32;
+        case DType::FLOAT64:
+            return DType::FLOAT64;
+    }
+    throw std::runtime_error("sum(): unknown dtype");
+}
+
+template <typename InT, typename AccT>
+static std::shared_ptr<Tensor> run_cpu_sum_axis_typed_impl(std::shared_ptr<Tensor> a, int dim, bool keepdim, DType out_dtype) {
+    if (!a->is_contiguous())
+        throw std::invalid_argument("sum() requires a contiguous tensor. Call .contiguous() first.");
+
+    int ndim = (int)a->shape.size();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) throw std::out_of_range("sum() dim out of range");
+
+    int outer_size = 1, inner_size = 1;
+    for (int i = 0; i < dim; ++i) outer_size *= a->shape[i];
+    for (int i = dim + 1; i < ndim; ++i) inner_size *= a->shape[i];
+    int reduce_size = a->shape[dim];
+
+    std::vector<int> out_shape;
+    for (int i = 0; i < ndim; ++i) {
+        if (i == dim) { if (keepdim) out_shape.push_back(1); }
+        else out_shape.push_back(a->shape[i]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    auto result = std::make_shared<Tensor>(out_shape, std::string("cpu"), out_dtype);
+    const InT* ap = static_cast<const InT*>(a->data_ptr);
+    AccT* rp = static_cast<AccT*>(result->data_ptr);
+
+    for (int o = 0; o < outer_size; ++o) {
+        for (int i = 0; i < inner_size; ++i) {
+            AccT acc = AccT(0);
+            for (int r = 0; r < reduce_size; ++r) {
+                acc += (AccT)ap[(o * reduce_size + r) * inner_size + i];
+            }
+            rp[o * inner_size + i] = acc;
+        }
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_sum_axis_typed(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
+    DType out_dtype = sum_result_dtype(a->dtype);
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_sum_axis_typed_impl<double, double>(a, dim, keepdim, out_dtype);
+        case DType::INT32:   return run_cpu_sum_axis_typed_impl<int32_t, int64_t>(a, dim, keepdim, out_dtype);
+        case DType::INT64:   return run_cpu_sum_axis_typed_impl<int64_t, int64_t>(a, dim, keepdim, out_dtype);
+        default: throw std::runtime_error("sum(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+template <typename InT, typename AccT>
+static std::shared_ptr<Tensor> run_cpu_sum_all_typed_impl(std::shared_ptr<Tensor> a, DType out_dtype) {
+    if (!a->is_contiguous())
+        throw std::invalid_argument("sum() requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(std::vector<int>{1}, std::string("cpu"), out_dtype);
+    const InT* ap = static_cast<const InT*>(a->data_ptr);
+    AccT acc = AccT(0);
+    for (int i = 0; i < a->size; ++i) acc += (AccT)ap[i];
+    static_cast<AccT*>(result->data_ptr)[0] = acc;
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_sum_all_typed(std::shared_ptr<Tensor> a) {
+    DType out_dtype = sum_result_dtype(a->dtype);
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_sum_all_typed_impl<double, double>(a, out_dtype);
+        case DType::INT32:   return run_cpu_sum_all_typed_impl<int32_t, int64_t>(a, out_dtype);
+        case DType::INT64:   return run_cpu_sum_all_typed_impl<int64_t, int64_t>(a, out_dtype);
+        default: throw std::runtime_error("sum(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+template <typename T>
+static std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis_typed_impl(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
+    if (!a->is_contiguous())
+        throw std::invalid_argument("max() requires a contiguous tensor. Call .contiguous() first.");
+
+    int ndim = (int)a->shape.size();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) throw std::out_of_range("max() dim out of range");
+
+    int outer_size = 1, inner_size = 1;
+    for (int i = 0; i < dim; ++i) outer_size *= a->shape[i];
+    for (int i = dim + 1; i < ndim; ++i) inner_size *= a->shape[i];
+    int reduce_size = a->shape[dim];
+
+    std::vector<int> out_shape;
+    for (int i = 0; i < ndim; ++i) {
+        if (i == dim) { if (keepdim) out_shape.push_back(1); }
+        else out_shape.push_back(a->shape[i]);
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    auto result = std::make_shared<Tensor>(out_shape, std::string("cpu"), a->dtype);
+    const T* ap = static_cast<const T*>(a->data_ptr);
+    T* rp = static_cast<T*>(result->data_ptr);
+    std::vector<int> argmax(outer_size * inner_size);
+
+    for (int o = 0; o < outer_size; ++o) {
+        for (int i = 0; i < inner_size; ++i) {
+            T best = ap[(o * reduce_size + 0) * inner_size + i];
+            int best_r = 0;
+            for (int r = 1; r < reduce_size; ++r) {
+                T v = ap[(o * reduce_size + r) * inner_size + i];
+                if (v > best) { best = v; best_r = r; }
+            }
+            rp[o * inner_size + i] = best;
+            argmax[o * inner_size + i] = best_r;
+        }
+    }
+    return {result, argmax};
+}
+
+std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis_typed(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_max_axis_typed_impl<double>(a, dim, keepdim);
+        case DType::INT32:   return run_cpu_max_axis_typed_impl<int32_t>(a, dim, keepdim);
+        case DType::INT64:   return run_cpu_max_axis_typed_impl<int64_t>(a, dim, keepdim);
+        default: throw std::runtime_error("max(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cpu_max_axis_backward_typed_impl(std::shared_ptr<Tensor> grad_out, const std::vector<int>& argmax,
+                                                                     std::vector<int> orig_shape, int dim, int reduce_size, int inner_size, DType dt) {
+    auto grad_in = std::make_shared<Tensor>(orig_shape, std::string("cpu"), dt);
+    grad_in->fill_zero_typed(dt);
+
+    const T* gop = static_cast<const T*>(grad_out->data_ptr);
+    T* gip = static_cast<T*>(grad_in->data_ptr);
+
+    int out_size = (int)argmax.size();
+    int outer_size = out_size / inner_size;
+    for (int o = 0; o < outer_size; ++o) {
+        for (int i = 0; i < inner_size; ++i) {
+            int idx = o * inner_size + i;
+            int r = argmax[idx];
+            gip[(o * reduce_size + r) * inner_size + i] = gop[idx];
+        }
+    }
+    return grad_in;
+}
+
+std::shared_ptr<Tensor> run_cpu_max_axis_backward_typed(std::shared_ptr<Tensor> grad_out, const std::vector<int>& argmax,
+                                                         std::vector<int> orig_shape, int dim, int reduce_size, int inner_size) {
+    switch (grad_out->dtype) {
+        case DType::FLOAT64: return run_cpu_max_axis_backward_typed_impl<double>(grad_out, argmax, orig_shape, dim, reduce_size, inner_size, DType::FLOAT64);
+        case DType::INT32:   return run_cpu_max_axis_backward_typed_impl<int32_t>(grad_out, argmax, orig_shape, dim, reduce_size, inner_size, DType::INT32);
+        case DType::INT64:   return run_cpu_max_axis_backward_typed_impl<int64_t>(grad_out, argmax, orig_shape, dim, reduce_size, inner_size, DType::INT64);
+        default: throw std::runtime_error("max() backward: unsupported dtype '" + dtype_name(grad_out->dtype) + "'");
+    }
+}
+
+// ---- Typed relu / relu_backward ----
+// Well-defined on integers (pure comparison + select), so int32/int64 are
+// supported here, unlike sigmoid/tanh/exp/log which require float math.
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cpu_relu_typed_impl(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"), a->dtype);
+    const T* ap = static_cast<const T*>(a->data_ptr);
+    T* rp = static_cast<T*>(result->data_ptr);
+    for (int i = 0; i < a->size; ++i) {
+        T v = ap[i];
+        rp[i] = v > T(0) ? v : T(0);
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_relu_typed(std::shared_ptr<Tensor> a) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_relu_typed_impl<double>(a);
+        case DType::INT32:   return run_cpu_relu_typed_impl<int32_t>(a);
+        case DType::INT64:   return run_cpu_relu_typed_impl<int64_t>(a);
+        default: throw std::runtime_error("relu(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cpu_relu_backward_typed_impl(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"), input->dtype);
+    const T* gop = static_cast<const T*>(grad_out->data_ptr);
+    const T* ip = static_cast<const T*>(input->data_ptr);
+    T* rp = static_cast<T*>(result->data_ptr);
+    for (int i = 0; i < input->size; ++i) {
+        rp[i] = ip[i] > T(0) ? gop[i] : T(0);
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_relu_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    switch (input->dtype) {
+        case DType::FLOAT64: return run_cpu_relu_backward_typed_impl<double>(grad_out, input);
+        case DType::INT32:   return run_cpu_relu_backward_typed_impl<int32_t>(grad_out, input);
+        case DType::INT64:   return run_cpu_relu_backward_typed_impl<int64_t>(grad_out, input);
+        default: throw std::runtime_error("relu() backward: unsupported dtype '" + dtype_name(input->dtype) + "'");
+    }
+}
+
+template <typename T, typename F>
+static std::shared_ptr<Tensor> run_cpu_scalar_typed_impl(std::shared_ptr<Tensor> a, double s, F op) {
+    auto result = std::make_shared<Tensor>(a->shape, a->device, a->dtype);
+    const T* ap = static_cast<const T*>(a->data_ptr);
+    T* rp = static_cast<T*>(result->data_ptr);
+    T sv = static_cast<T>(s);
+    for (int i = 0; i < a->size; ++i) rp[i] = op(ap[i], sv);
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_add_scalar_typed(std::shared_ptr<Tensor> a, double s) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_scalar_typed_impl<double>(a, s, [](double x, double y){ return x+y; });
+        case DType::INT32:   return run_cpu_scalar_typed_impl<int32_t>(a, s, [](int32_t x, int32_t y){ return x+y; });
+        case DType::INT64:   return run_cpu_scalar_typed_impl<int64_t>(a, s, [](int64_t x, int64_t y){ return x+y; });
+        default: throw std::runtime_error("add(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+std::shared_ptr<Tensor> run_cpu_sub_scalar_typed(std::shared_ptr<Tensor> a, double s) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_scalar_typed_impl<double>(a, s, [](double x, double y){ return x-y; });
+        case DType::INT32:   return run_cpu_scalar_typed_impl<int32_t>(a, s, [](int32_t x, int32_t y){ return x-y; });
+        case DType::INT64:   return run_cpu_scalar_typed_impl<int64_t>(a, s, [](int64_t x, int64_t y){ return x-y; });
+        default: throw std::runtime_error("sub(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+std::shared_ptr<Tensor> run_cpu_mul_scalar_typed(std::shared_ptr<Tensor> a, double s) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_scalar_typed_impl<double>(a, s, [](double x, double y){ return x*y; });
+        case DType::INT32:   return run_cpu_scalar_typed_impl<int32_t>(a, s, [](int32_t x, int32_t y){ return x*y; });
+        case DType::INT64:   return run_cpu_scalar_typed_impl<int64_t>(a, s, [](int64_t x, int64_t y){ return x*y; });
+        default: throw std::runtime_error("mul(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+std::shared_ptr<Tensor> run_cpu_div_scalar_typed(std::shared_ptr<Tensor> a, double s) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_scalar_typed_impl<double>(a, s, [](double x, double y){ return x/y; });
+        case DType::INT32:   return run_cpu_scalar_typed_impl<int32_t>(a, s, [](int32_t x, int32_t y){ return x/y; });
+        case DType::INT64:   return run_cpu_scalar_typed_impl<int64_t>(a, s, [](int64_t x, int64_t y){ return x/y; });
+        default: throw std::runtime_error("div(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+// ---- Typed scalar ops: add/sub/mul/div by a scalar ----
+template <typename T, typename F>
+static std::shared_ptr<Tensor> run_cpu_scalar_op_typed(std::shared_ptr<Tensor> a, double s, F op) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"), a->dtype);
+    T sv = (T)s;
+    if (a->is_contiguous()) {
+        const T* ap = static_cast<const T*>(a->data_ptr);
+        T* rp = static_cast<T*>(result->data_ptr);
+        for (int i = 0; i < a->size; ++i) rp[i] = op(ap[i], sv);
+    } else {
+        // Non-contiguous: gather via manual stride offsets (get_scalar_flat
+        // is float32-only, so this is done here directly instead).
+        T* rp = static_cast<T*>(result->data_ptr);
+        std::vector<int> idx(a->shape.size(), 0);
+        const T* ap = static_cast<const T*>(a->data_ptr);
+        for (int flat = 0; flat < a->size; ++flat) {
+            int off = 0;
+            for (size_t d = 0; d < a->shape.size(); ++d) off += idx[d] * a->strides[d];
+            rp[flat] = op(ap[off], sv);
+            for (int d = (int)a->shape.size() - 1; d >= 0; --d) {
+                if (++idx[d] < a->shape[d]) break;
+                idx[d] = 0;
+            }
+        }
+    }
+    return result;
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cpu_leaky_relu_typed_impl(std::shared_ptr<Tensor> a, double slope) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"), a->dtype);
+    const T* ap = static_cast<const T*>(a->data_ptr);
+    T* rp = static_cast<T*>(result->data_ptr);
+    for (int i = 0; i < a->size; ++i) {
+        T v = ap[i];
+        rp[i] = v > T(0) ? v : (T)((double)v * slope);
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_leaky_relu_typed(std::shared_ptr<Tensor> a, double slope) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_leaky_relu_typed_impl<double>(a, slope);
+        case DType::INT32:   return run_cpu_leaky_relu_typed_impl<int32_t>(a, slope);
+        case DType::INT64:   return run_cpu_leaky_relu_typed_impl<int64_t>(a, slope);
+        default: throw std::runtime_error("leaky_relu(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cpu_leaky_relu_backward_typed_impl(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, double slope) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"), input->dtype);
+    const T* gop = static_cast<const T*>(grad_out->data_ptr);
+    const T* ip = static_cast<const T*>(input->data_ptr);
+    T* rp = static_cast<T*>(result->data_ptr);
+    for (int i = 0; i < input->size; ++i) {
+        T x = ip[i];
+        T g = gop[i];
+        rp[i] = x > T(0) ? g : (T)((double)g * slope);
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_leaky_relu_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, double slope) {
+    switch (input->dtype) {
+        case DType::FLOAT64: return run_cpu_leaky_relu_backward_typed_impl<double>(grad_out, input, slope);
+        case DType::INT32:   return run_cpu_leaky_relu_backward_typed_impl<int32_t>(grad_out, input, slope);
+        case DType::INT64:   return run_cpu_leaky_relu_backward_typed_impl<int64_t>(grad_out, input, slope);
+        default: throw std::runtime_error("leaky_relu() backward: unsupported dtype '" + dtype_name(input->dtype) + "'");
+    }
+}

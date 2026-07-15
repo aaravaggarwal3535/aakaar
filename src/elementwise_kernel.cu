@@ -907,3 +907,525 @@ std::shared_ptr<Tensor> run_cuda_log_backward(std::shared_ptr<Tensor> grad_out, 
     return result;
 }
 
+template <typename T>
+struct alignas(16) Vec128 {
+    T vals[16 / sizeof(T)];
+};
+struct AddOp {
+    template <typename T>
+    __device__ __forceinline__ T operator()(T a, T b) const { return a + b; }
+};
+
+struct SubOp {
+    template <typename T>
+    __device__ __forceinline__ T operator()(T a, T b) const { return a - b; }
+};
+
+struct MulOp {
+    template <typename T>
+    __device__ __forceinline__ T operator()(T a, T b) const { return a * b; }
+};
+
+struct DivOp {
+    template <typename T>
+    __device__ __forceinline__ T operator()(T a, T b) const { return a / b; }
+};
+// ---------------------------------------------------------
+// 1. Optimized Device Kernels
+// ---------------------------------------------------------
+
+template <typename T>
+__global__ void relu_kernel_typed(const T* __restrict__ in, T* __restrict__ out, int n) {
+    constexpr int VEC_SIZE = 16 / sizeof(T);
+    int n_vec = n / VEC_SIZE;
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    const auto* in_vec = reinterpret_cast<const Vec128<T>*>(in);
+    auto* out_vec = reinterpret_cast<Vec128<T>*>(out);
+
+    for (int i = idx; i < n_vec; i += stride) {
+        Vec128<T> v = in_vec[i];
+        Vec128<T> res;
+        
+        #pragma unroll
+        for (int j = 0; j < VEC_SIZE; ++j) {
+            res.vals[j] = v.vals[j] > T(0) ? v.vals[j] : T(0);
+        }
+        out_vec[i] = res;
+    }
+
+    int tail_start = n_vec * VEC_SIZE;
+    for (int i = tail_start + idx; i < n; i += stride) {
+        T v = in[i];
+        out[i] = v > T(0) ? v : T(0);
+    }
+}
+
+template <typename T>
+__global__ void relu_backward_kernel_typed(const T* __restrict__ grad_out, const T* __restrict__ input,
+                                           T* __restrict__ out, int n) {
+    constexpr int VEC_SIZE = 16 / sizeof(T);
+    int n_vec = n / VEC_SIZE;
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    const auto* go_vec = reinterpret_cast<const Vec128<T>*>(grad_out);
+    const auto* in_vec = reinterpret_cast<const Vec128<T>*>(input);
+    auto* out_vec      = reinterpret_cast<Vec128<T>*>(out);
+
+    for (int i = idx; i < n_vec; i += stride) {
+        Vec128<T> g = go_vec[i];
+        Vec128<T> v = in_vec[i];
+        Vec128<T> res;
+        
+        #pragma unroll
+        for (int j = 0; j < VEC_SIZE; ++j) {
+            res.vals[j] = v.vals[j] > T(0) ? g.vals[j] : T(0);
+        }
+        out_vec[i] = res;
+    }
+
+    int tail_start = n_vec * VEC_SIZE;
+    for (int i = tail_start + idx; i < n; i += stride) {
+        out[i] = input[i] > T(0) ? grad_out[i] : T(0);
+    }
+}
+
+// ---------------------------------------------------------
+// 2. Host Launch Functions (Required by bindings.cpp)
+// ---------------------------------------------------------
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cuda_relu_typed_impl(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"), a->dtype);
+    int n = a->size;
+    if (n == 0) return result;
+    
+    int threads = 256;
+    constexpr int VEC_SIZE = 16 / sizeof(T);
+    int n_vec = n / VEC_SIZE;
+    int blocks = std::min((n_vec + threads - 1) / threads, 4096); 
+    if (blocks == 0) blocks = 1; 
+
+    relu_kernel_typed<T><<<blocks, threads>>>(
+        static_cast<const T*>(a->data_ptr), static_cast<T*>(result->data_ptr), n);
+        
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_relu_typed(std::shared_ptr<Tensor> a) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cuda_relu_typed_impl<double>(a);
+        case DType::INT32:   return run_cuda_relu_typed_impl<int32_t>(a);
+        case DType::INT64:   return run_cuda_relu_typed_impl<int64_t>(a);
+        default: throw std::runtime_error("relu(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cuda_relu_backward_typed_impl(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cuda"), input->dtype);
+    int n = input->size;
+    if (n == 0) return result;
+    
+    int threads = 256;
+    constexpr int VEC_SIZE = 16 / sizeof(T);
+    int n_vec = n / VEC_SIZE;
+    int blocks = std::min((n_vec + threads - 1) / threads, 4096);
+    if (blocks == 0) blocks = 1;
+
+    relu_backward_kernel_typed<T><<<blocks, threads>>>(
+        static_cast<const T*>(grad_out->data_ptr), static_cast<const T*>(input->data_ptr),
+        static_cast<T*>(result->data_ptr), n);
+        
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_relu_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    switch (input->dtype) {
+        case DType::FLOAT64: return run_cuda_relu_backward_typed_impl<double>(grad_out, input);
+        case DType::INT32:   return run_cuda_relu_backward_typed_impl<int32_t>(grad_out, input);
+        case DType::INT64:   return run_cuda_relu_backward_typed_impl<int64_t>(grad_out, input);
+        default: throw std::runtime_error("relu() backward: unsupported dtype '" + dtype_name(input->dtype) + "'");
+    }
+}
+
+template <typename T, typename Op>
+__global__ void scalar_typed_kernel(const T* __restrict__ a, T s, T* __restrict__ c, int n, Op op) {
+    constexpr int VEC_SIZE = 16 / sizeof(T);
+    int n_vec = n / VEC_SIZE;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    const auto* a_vec = reinterpret_cast<const Vec128<T>*>(a);
+    auto* c_vec = reinterpret_cast<Vec128<T>*>(c);
+
+    // Vectorized 128-bit grid stride loop
+    for (int i = idx; i < n_vec; i += stride) {
+        Vec128<T> v = a_vec[i];
+        Vec128<T> res;
+        
+        #pragma unroll
+        for (int j = 0; j < VEC_SIZE; ++j) {
+            res.vals[j] = op(v.vals[j], s);
+        }
+        c_vec[i] = res;
+    }
+
+    // Scalar tail loop for remainders
+    int tail_start = n_vec * VEC_SIZE;
+    for (int i = tail_start + idx; i < n; i += stride) {
+        c[i] = op(a[i], s);
+    }
+}
+
+template <typename T, typename Op>
+static std::shared_ptr<Tensor> run_cuda_scalar_typed_impl(std::shared_ptr<Tensor> a, double s, Op op) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"), a->dtype);
+    T sv = static_cast<T>(s);
+    int n = a->size;
+    if (n == 0) return result;
+
+    int threads = 256;
+    constexpr int VEC_SIZE = 16 / sizeof(T);
+    int n_vec = n / VEC_SIZE;
+    
+    // Cap blocks at 4096 to prevent scheduler overhead; the grid-stride loop handles the rest.
+    int blocks = std::min((n_vec + threads - 1) / threads, 4096);
+    if (blocks == 0) blocks = 1;
+
+    scalar_typed_kernel<T, Op><<<blocks, threads>>>(
+        static_cast<const T*>(a->data_ptr), sv, static_cast<T*>(result->data_ptr), n, op);
+        
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    }
+    
+    return result;
+}
+
+// ---- Scalar-op functors (reuse the AddOp/SubOp/MulOp/DivOp convention
+// already used elsewhere in this file for the tensor-tensor typed ops) ----
+struct ScalarAddOp { template<typename T> __device__ T operator()(T a, T b) const { return a + b; } };
+struct ScalarSubOp { template<typename T> __device__ T operator()(T a, T b) const { return a - b; } };
+struct ScalarMulOp { template<typename T> __device__ T operator()(T a, T b) const { return a * b; } };
+struct ScalarDivOp { template<typename T> __device__ T operator()(T a, T b) const { return a / b; } };
+
+template <typename T, typename Op>
+__global__ void scalar_op_scalar_kernel(const T* __restrict__ in, T* __restrict__ out, T s, int n, Op op) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) out[i] = op(__ldg(&in[i]), s);
+}
+
+template <typename T, typename Op>
+static std::shared_ptr<Tensor> run_cuda_scalar_op_typed(std::shared_ptr<Tensor> a, double s, Op op) {
+    if (!a->is_contiguous())
+        throw std::invalid_argument("Scalar ops require a contiguous tensor for non-float32 dtypes. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"), a->dtype);
+    int n = a->size;
+    if (n == 0) return result;
+    T sv = (T)s;
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    if (blocks > 65535) blocks = 65535;
+    scalar_op_scalar_kernel<T, Op><<<blocks, threads>>>(
+        static_cast<const T*>(a->data_ptr), static_cast<T*>(result->data_ptr), sv, n, op);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_add_scalar_typed(std::shared_ptr<Tensor> a, double s) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cuda_scalar_op_typed<double>(a, s, ScalarAddOp{});
+        case DType::INT32:   return run_cuda_scalar_op_typed<int32_t>(a, s, ScalarAddOp{});
+        case DType::INT64:   return run_cuda_scalar_op_typed<int64_t>(a, s, ScalarAddOp{});
+        default: throw std::runtime_error("add_scalar(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+std::shared_ptr<Tensor> run_cuda_sub_scalar_typed(std::shared_ptr<Tensor> a, double s) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cuda_scalar_op_typed<double>(a, s, ScalarSubOp{});
+        case DType::INT32:   return run_cuda_scalar_op_typed<int32_t>(a, s, ScalarSubOp{});
+        case DType::INT64:   return run_cuda_scalar_op_typed<int64_t>(a, s, ScalarSubOp{});
+        default: throw std::runtime_error("sub_scalar(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+std::shared_ptr<Tensor> run_cuda_mul_scalar_typed(std::shared_ptr<Tensor> a, double s) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cuda_scalar_op_typed<double>(a, s, ScalarMulOp{});
+        case DType::INT32:   return run_cuda_scalar_op_typed<int32_t>(a, s, ScalarMulOp{});
+        case DType::INT64:   return run_cuda_scalar_op_typed<int64_t>(a, s, ScalarMulOp{});
+        default: throw std::runtime_error("mul_scalar(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+std::shared_ptr<Tensor> run_cuda_div_scalar_typed(std::shared_ptr<Tensor> a, double s) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cuda_scalar_op_typed<double>(a, s, ScalarDivOp{});
+        case DType::INT32:   return run_cuda_scalar_op_typed<int32_t>(a, s, ScalarDivOp{});
+        case DType::INT64:   return run_cuda_scalar_op_typed<int64_t>(a, s, ScalarDivOp{});
+        default: throw std::runtime_error("div_scalar(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+// ---- Typed leaky_relu (CUDA), vectorized per-type ----
+
+template <typename T>
+__global__ void leaky_relu_scalar_kernel_typed(const T* __restrict__ in, T* __restrict__ out, double slope, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        T v = __ldg(&in[i]);
+        out[i] = v > T(0) ? v : (T)((double)v * slope);
+    }
+}
+
+__global__ void leaky_relu_vec4_kernel_f32(const float4* __restrict__ in, float4* __restrict__ out, double slope, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 v = __ldg(&in[i]);
+        float4 r;
+        r.x = v.x > 0.0f ? v.x : (float)((double)v.x * slope);
+        r.y = v.y > 0.0f ? v.y : (float)((double)v.y * slope);
+        r.z = v.z > 0.0f ? v.z : (float)((double)v.z * slope);
+        r.w = v.w > 0.0f ? v.w : (float)((double)v.w * slope);
+        out[i] = r;
+    }
+}
+
+__global__ void leaky_relu_vec2_kernel_f64(const double2* __restrict__ in, double2* __restrict__ out, double slope, int n2) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n2; i += stride) {
+        double2 v = __ldg(&in[i]);
+        double2 r;
+        r.x = v.x > 0.0 ? v.x : v.x * slope;
+        r.y = v.y > 0.0 ? v.y : v.y * slope;
+        out[i] = r;
+    }
+}
+
+__global__ void leaky_relu_vec4_kernel_i32(const int4* __restrict__ in, int4* __restrict__ out, double slope, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        int4 v = __ldg(&in[i]);
+        int4 r;
+        r.x = v.x > 0 ? v.x : (int32_t)((double)v.x * slope);
+        r.y = v.y > 0 ? v.y : (int32_t)((double)v.y * slope);
+        r.z = v.z > 0 ? v.z : (int32_t)((double)v.z * slope);
+        r.w = v.w > 0 ? v.w : (int32_t)((double)v.w * slope);
+        out[i] = r;
+    }
+}
+
+__global__ void leaky_relu_vec2_kernel_i64(const longlong2* __restrict__ in, longlong2* __restrict__ out, double slope, int n2) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n2; i += stride) {
+        longlong2 v = __ldg(&in[i]);
+        longlong2 r;
+        r.x = v.x > 0 ? v.x : (int64_t)((double)v.x * slope);
+        r.y = v.y > 0 ? v.y : (int64_t)((double)v.y * slope);
+        out[i] = r;
+    }
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cuda_leaky_relu_typed_impl(std::shared_ptr<Tensor> a, double slope) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"), a->dtype);
+    int n = a->size;
+    if (n == 0) return result;
+
+    const T* in_ptr = static_cast<const T*>(a->data_ptr);
+    T* out_ptr = static_cast<T*>(result->data_ptr);
+
+    constexpr int lanes = (sizeof(T) == 4) ? 4 : 2;
+    bool can_vec = (n >= lanes) && is_aligned16(in_ptr) && is_aligned16(out_ptr);
+
+    if (can_vec) {
+        int n_vec = n / lanes;
+        int tail = n - n_vec * lanes;
+
+        if constexpr (std::is_same<T, float>::value) {
+            leaky_relu_vec4_kernel_f32<<<elem_blocks(n_vec), 256>>>(
+                reinterpret_cast<const float4*>(in_ptr), reinterpret_cast<float4*>(out_ptr), slope, n_vec);
+        } else if constexpr (std::is_same<T, double>::value) {
+            leaky_relu_vec2_kernel_f64<<<elem_blocks(n_vec), 256>>>(
+                reinterpret_cast<const double2*>(in_ptr), reinterpret_cast<double2*>(out_ptr), slope, n_vec);
+        } else if constexpr (std::is_same<T, int32_t>::value) {
+            leaky_relu_vec4_kernel_i32<<<elem_blocks(n_vec), 256>>>(
+                reinterpret_cast<const int4*>(in_ptr), reinterpret_cast<int4*>(out_ptr), slope, n_vec);
+        } else if constexpr (std::is_same<T, int64_t>::value) {
+            leaky_relu_vec2_kernel_i64<<<elem_blocks(n_vec), 256>>>(
+                reinterpret_cast<const longlong2*>(in_ptr), reinterpret_cast<longlong2*>(out_ptr), slope, n_vec);
+        }
+
+        if (tail > 0) {
+            leaky_relu_scalar_kernel_typed<T><<<elem_blocks(tail), 256>>>(
+                in_ptr + n_vec * lanes, out_ptr + n_vec * lanes, slope, tail);
+        }
+    } else {
+        leaky_relu_scalar_kernel_typed<T><<<elem_blocks(n), 256>>>(in_ptr, out_ptr, slope, n);
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_leaky_relu_typed(std::shared_ptr<Tensor> a, double slope) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cuda_leaky_relu_typed_impl<double>(a, slope);
+        case DType::INT32:   return run_cuda_leaky_relu_typed_impl<int32_t>(a, slope);
+        case DType::INT64:   return run_cuda_leaky_relu_typed_impl<int64_t>(a, slope);
+        default: throw std::runtime_error("leaky_relu(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+// ---- Typed leaky_relu_backward (CUDA) ----
+
+template <typename T>
+__global__ void leaky_relu_backward_scalar_kernel_typed(const T* __restrict__ grad_out, const T* __restrict__ input,
+                                                         T* __restrict__ out, T slope, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        T x = __ldg(&input[i]);
+        T g = __ldg(&grad_out[i]);
+        out[i] = x > T(0) ? g : (T)(g * slope);
+    }
+}
+
+__global__ void leaky_relu_backward_vec4_kernel_f32(const float4* __restrict__ grad_out, const float4* __restrict__ input,
+                                                     float4* __restrict__ out, float slope, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 x = __ldg(&input[i]);
+        float4 g = __ldg(&grad_out[i]);
+        float4 r;
+        r.x = x.x > 0.0f ? g.x : g.x * slope;
+        r.y = x.y > 0.0f ? g.y : g.y * slope;
+        r.z = x.z > 0.0f ? g.z : g.z * slope;
+        r.w = x.w > 0.0f ? g.w : g.w * slope;
+        out[i] = r;
+    }
+}
+
+__global__ void leaky_relu_backward_vec2_kernel_f64(const double2* __restrict__ grad_out, const double2* __restrict__ input,
+                                                     double2* __restrict__ out, double slope, int n2) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n2; i += stride) {
+        double2 x = __ldg(&input[i]);
+        double2 g = __ldg(&grad_out[i]);
+        double2 r;
+        r.x = x.x > 0.0 ? g.x : g.x * slope;
+        r.y = x.y > 0.0 ? g.y : g.y * slope;
+        out[i] = r;
+    }
+}
+
+__global__ void leaky_relu_backward_vec4_kernel_i32(const int4* __restrict__ grad_out, const int4* __restrict__ input,
+                                                     int4* __restrict__ out, int32_t slope, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        int4 x = __ldg(&input[i]);
+        int4 g = __ldg(&grad_out[i]);
+        int4 r;
+        r.x = x.x > 0 ? g.x : g.x * slope;
+        r.y = x.y > 0 ? g.y : g.y * slope;
+        r.z = x.z > 0 ? g.z : g.z * slope;
+        r.w = x.w > 0 ? g.w : g.w * slope;
+        out[i] = r;
+    }
+}
+
+__global__ void leaky_relu_backward_vec2_kernel_i64(const longlong2* __restrict__ grad_out, const longlong2* __restrict__ input,
+                                                     longlong2* __restrict__ out, int64_t slope, int n2) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n2; i += stride) {
+        longlong2 x = __ldg(&input[i]);
+        longlong2 g = __ldg(&grad_out[i]);
+        longlong2 r;
+        r.x = x.x > 0 ? g.x : g.x * slope;
+        r.y = x.y > 0 ? g.y : g.y * slope;
+        out[i] = r;
+    }
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cuda_leaky_relu_backward_typed_impl(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, double slope) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cuda"), input->dtype);
+    int n = input->size;
+    if (n == 0) return result;
+
+    const T* go_ptr = static_cast<const T*>(grad_out->data_ptr);
+    const T* in_ptr = static_cast<const T*>(input->data_ptr);
+    T* out_ptr = static_cast<T*>(result->data_ptr);
+    T s = (T)slope;
+
+    constexpr int lanes = (sizeof(T) == 4) ? 4 : 2;
+    bool can_vec = (n >= lanes) && is_aligned16(go_ptr) && is_aligned16(in_ptr) && is_aligned16(out_ptr);
+
+    if (can_vec) {
+        int n_vec = n / lanes;
+        int tail = n - n_vec * lanes;
+
+        if constexpr (std::is_same<T, float>::value) {
+            leaky_relu_backward_vec4_kernel_f32<<<elem_blocks(n_vec), 256>>>(
+                reinterpret_cast<const float4*>(go_ptr), reinterpret_cast<const float4*>(in_ptr),
+                reinterpret_cast<float4*>(out_ptr), s, n_vec);
+        } else if constexpr (std::is_same<T, double>::value) {
+            leaky_relu_backward_vec2_kernel_f64<<<elem_blocks(n_vec), 256>>>(
+                reinterpret_cast<const double2*>(go_ptr), reinterpret_cast<const double2*>(in_ptr),
+                reinterpret_cast<double2*>(out_ptr), s, n_vec);
+        } else if constexpr (std::is_same<T, int32_t>::value) {
+            leaky_relu_backward_vec4_kernel_i32<<<elem_blocks(n_vec), 256>>>(
+                reinterpret_cast<const int4*>(go_ptr), reinterpret_cast<const int4*>(in_ptr),
+                reinterpret_cast<int4*>(out_ptr), s, n_vec);
+        } else if constexpr (std::is_same<T, int64_t>::value) {
+            leaky_relu_backward_vec2_kernel_i64<<<elem_blocks(n_vec), 256>>>(
+                reinterpret_cast<const longlong2*>(go_ptr), reinterpret_cast<const longlong2*>(in_ptr),
+                reinterpret_cast<longlong2*>(out_ptr), s, n_vec);
+        }
+
+        if (tail > 0) {
+            leaky_relu_backward_scalar_kernel_typed<T><<<elem_blocks(tail), 256>>>(
+                go_ptr + n_vec * lanes, in_ptr + n_vec * lanes, out_ptr + n_vec * lanes, s, tail);
+        }
+    } else {
+        leaky_relu_backward_scalar_kernel_typed<T><<<elem_blocks(n), 256>>>(go_ptr, in_ptr, out_ptr, s, n);
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_leaky_relu_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, double slope) {
+    switch (input->dtype) {
+        case DType::FLOAT64: return run_cuda_leaky_relu_backward_typed_impl<double>(grad_out, input, slope);
+        case DType::INT32:   return run_cuda_leaky_relu_backward_typed_impl<int32_t>(grad_out, input, slope);
+        case DType::INT64:   return run_cuda_leaky_relu_backward_typed_impl<int64_t>(grad_out, input, slope);
+        default: throw std::runtime_error("leaky_relu() backward: unsupported dtype '" + dtype_name(input->dtype) + "'");
+    }
+}

@@ -30,6 +30,8 @@ std::shared_ptr<Tensor> run_cpu_mul_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cpu_div_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cpu_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
 std::shared_ptr<Tensor> run_cpu_sum_all(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cpu_sum_axis_typed(std::shared_ptr<Tensor> a, int dim, bool keepdim);
+std::shared_ptr<Tensor> run_cpu_sum_all_typed(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size);
 std::shared_ptr<Tensor> run_cpu_relu(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
@@ -47,6 +49,17 @@ std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis(std::share
 std::shared_ptr<Tensor> run_cpu_max_axis_backward(std::shared_ptr<Tensor> grad_out, const std::vector<int>& argmax,
                                                    std::vector<int> orig_shape, int dim, int reduce_size, int inner_size);
 std::string get_openblas_diagnostic();
+std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis_typed(std::shared_ptr<Tensor> a, int dim, bool keepdim);
+std::shared_ptr<Tensor> run_cpu_max_axis_backward_typed(std::shared_ptr<Tensor> grad_out, const std::vector<int>& argmax,
+                                                         std::vector<int> orig_shape, int dim, int reduce_size, int inner_size);
+std::shared_ptr<Tensor> run_cpu_relu_typed(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cpu_relu_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
+std::shared_ptr<Tensor> run_cpu_add_scalar_typed(std::shared_ptr<Tensor> a, double s);
+std::shared_ptr<Tensor> run_cpu_sub_scalar_typed(std::shared_ptr<Tensor> a, double s);
+std::shared_ptr<Tensor> run_cpu_mul_scalar_typed(std::shared_ptr<Tensor> a, double s);
+std::shared_ptr<Tensor> run_cpu_div_scalar_typed(std::shared_ptr<Tensor> a, double s);
+std::shared_ptr<Tensor> run_cpu_leaky_relu_typed(std::shared_ptr<Tensor> a, double slope);
+std::shared_ptr<Tensor> run_cpu_leaky_relu_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, double slope);
 
 
 #ifndef AAKAAR_NO_CUDA
@@ -69,6 +82,8 @@ std::shared_ptr<Tensor> run_cuda_mul_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cuda_div_scalar(std::shared_ptr<Tensor> a, float s);
 std::shared_ptr<Tensor> run_cuda_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
 std::shared_ptr<Tensor> run_cuda_sum_all(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cuda_sum_axis_typed(std::shared_ptr<Tensor> a, int dim, bool keepdim);
+std::shared_ptr<Tensor> run_cuda_sum_all_typed(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size);
 std::shared_ptr<Tensor> run_cuda_relu(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
@@ -83,8 +98,19 @@ std::shared_ptr<Tensor> run_cuda_exp_backward(std::shared_ptr<Tensor> grad_out, 
 std::shared_ptr<Tensor> run_cuda_log(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_log_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
 std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cuda_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
+std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cuda_max_axis_typed(std::shared_ptr<Tensor> a, int dim, bool keepdim);
+std::shared_ptr<Tensor> run_cuda_max_axis_backward_typed(std::shared_ptr<Tensor> grad_out, const std::vector<int>& argmax,
+                                                          std::vector<int> orig_shape, int dim, int reduce_size, int inner_size);
 std::shared_ptr<Tensor> run_cuda_max_axis_backward(std::shared_ptr<Tensor> grad_out, const std::vector<int>& argmax,
                                                     std::vector<int> orig_shape, int dim, int reduce_size, int inner_size);
+std::shared_ptr<Tensor> run_cuda_relu_typed(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cuda_relu_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
+std::shared_ptr<Tensor> run_cuda_add_scalar_typed(std::shared_ptr<Tensor> a, double s);
+std::shared_ptr<Tensor> run_cuda_sub_scalar_typed(std::shared_ptr<Tensor> a, double s);
+std::shared_ptr<Tensor> run_cuda_mul_scalar_typed(std::shared_ptr<Tensor> a, double s);
+std::shared_ptr<Tensor> run_cuda_div_scalar_typed(std::shared_ptr<Tensor> a, double s);
+std::shared_ptr<Tensor> run_cuda_leaky_relu_typed(std::shared_ptr<Tensor> a, double slope);
+std::shared_ptr<Tensor> run_cuda_leaky_relu_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, double slope);
 void empty_cache() { CachingAllocator::get_instance().empty_cache(); }
 #endif
 
@@ -119,33 +145,61 @@ bool cuda_is_available() {
 }
 
 // ---- Dispatch implementations ----
-static std::shared_ptr<Tensor> dispatch_leaky_relu(std::shared_ptr<Tensor> a, float slope) {
+static std::shared_ptr<Tensor> dispatch_leaky_relu(std::shared_ptr<Tensor> a, double slope) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && a->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                    "'. Only float32 currently supports gradients.");
+        if (!a->is_contiguous()) a = dispatch_contiguous(a);
+        std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") result = run_cuda_leaky_relu_typed(a, slope);
+        else
+#endif
+        result = run_cpu_leaky_relu_typed(a, slope);
+        return result;
+    }
     if (!a->is_contiguous()) a = dispatch_contiguous(a);
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
-    if (a->device == "cuda") result = run_cuda_leaky_relu(a, slope);
+    if (a->device == "cuda") result = run_cuda_leaky_relu(a, (float)slope);
     else
 #endif
-    result = run_cpu_leaky_relu(a, slope);
+    result = run_cpu_leaky_relu(a, (float)slope);
 
     if (g_grad_enabled && a->requires_grad) {
         result->requires_grad = true;
         auto node = std::make_shared<Node>();
         node->inputs = {a};
         node->op_name = "leaky_relu";
-        node->backward_fn = [a, slope](std::shared_ptr<Tensor> grad_out) {
+        auto slope_f = (float)slope;
+        node->backward_fn = [a, slope_f](std::shared_ptr<Tensor> grad_out) {
 #ifndef AAKAAR_NO_CUDA
-            if (a->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_leaky_relu_backward(grad_out, a, slope)};
+            if (a->device == "cuda") return std::vector<std::shared_ptr<Tensor>>{run_cuda_leaky_relu_backward(grad_out, a, slope_f)};
 #endif
-            return std::vector<std::shared_ptr<Tensor>>{run_cpu_leaky_relu_backward(grad_out, a, slope)};
+            return std::vector<std::shared_ptr<Tensor>>{run_cpu_leaky_relu_backward(grad_out, a, slope_f)};
         };
         result->grad_fn = node;
     }
     return result;
 }
 static std::shared_ptr<Tensor> dispatch_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
-    if (!a->is_contiguous()) a = dispatch_contiguous(a);
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && a->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+        if (!a->is_contiguous()) a = dispatch_contiguous(a);
 
+        int ndim = (int)a->shape.size();
+        int norm_dim = dim < 0 ? dim + ndim : dim;
+
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") { auto pr = run_cuda_max_axis_typed(a, dim, keepdim); return pr.first; }
+#endif
+        auto pr = run_cpu_max_axis_typed(a, dim, keepdim);
+        return pr.first;
+    }
+    if (!a->is_contiguous()) a = dispatch_contiguous(a);    
     int ndim = (int)a->shape.size();
     int norm_dim = dim < 0 ? dim + ndim : dim;
     int reduce_size = a->shape[norm_dim];
@@ -235,12 +289,29 @@ static std::shared_ptr<Tensor> dispatch_log(std::shared_ptr<Tensor> a) {
 }
 
 static std::shared_ptr<Tensor> dispatch_add_scalar(std::shared_ptr<Tensor> a, float s) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && a->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_add_scalar_typed(a, (double)s);
+#endif
+        return run_cpu_add_scalar_typed(a, (double)s);
+    }
+
+    // --- THE MISSING COMPUTATION ---
+    // We must declare and compute 'result' for FLOAT32 before doing autograd wiring
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
-    if (a->device == "cuda") result = run_cuda_add_scalar(a, s);
-    else
+    if (a->device == "cuda") {
+        // Use your specific float32 CUDA function here (or the typed one if they share it)
+        result = run_cuda_add_scalar(a, s); 
+    } else 
 #endif
-    result = run_cpu_add_scalar(a, s);
+    {
+        result = run_cpu_add_scalar(a, s);
+    }
+    // -------------------------------
 
     if (g_grad_enabled && a->requires_grad) {
         result->requires_grad = true;
@@ -256,6 +327,16 @@ static std::shared_ptr<Tensor> dispatch_add_scalar(std::shared_ptr<Tensor> a, fl
 }
 
 static std::shared_ptr<Tensor> dispatch_sub_scalar(std::shared_ptr<Tensor> a, float s) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && a->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_sub_scalar_typed(a, (double)s);
+#endif
+        return run_cpu_sub_scalar_typed(a, (double)s);
+    }
+
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
     if (a->device == "cuda") result = run_cuda_sub_scalar(a, s);
@@ -277,6 +358,16 @@ static std::shared_ptr<Tensor> dispatch_sub_scalar(std::shared_ptr<Tensor> a, fl
 }
 
 static std::shared_ptr<Tensor> dispatch_mul_scalar(std::shared_ptr<Tensor> a, float s) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && a->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_mul_scalar_typed(a, (double)s);
+#endif
+        return run_cpu_mul_scalar_typed(a, (double)s);
+    }
+
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
     if (a->device == "cuda") result = run_cuda_mul_scalar(a, s);
@@ -299,6 +390,16 @@ static std::shared_ptr<Tensor> dispatch_mul_scalar(std::shared_ptr<Tensor> a, fl
 }
 
 static std::shared_ptr<Tensor> dispatch_div_scalar(std::shared_ptr<Tensor> a, float s) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && a->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_div_scalar_typed(a, (double)s);
+#endif
+        return run_cpu_div_scalar_typed(a, (double)s);
+    }
+
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
     if (a->device == "cuda") result = run_cuda_div_scalar(a, s);
@@ -321,6 +422,21 @@ static std::shared_ptr<Tensor> dispatch_div_scalar(std::shared_ptr<Tensor> a, fl
 }
 
 static std::shared_ptr<Tensor> dispatch_relu(std::shared_ptr<Tensor> a) {
+    if (a->dtype != DType::FLOAT32) {
+        if (!a->is_contiguous()) a = dispatch_contiguous(a);
+        std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") result = run_cuda_relu_typed(a);
+        else
+#endif
+        result = run_cpu_relu_typed(a);
+
+        if (g_grad_enabled && a->requires_grad) {
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+        }
+        return result;
+    }
     if (!a->is_contiguous()) a = dispatch_contiguous(a);
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
@@ -500,6 +616,15 @@ static std::shared_ptr<Tensor> dispatch_contiguous(std::shared_ptr<Tensor> a) {
     return result;
 }
 static std::shared_ptr<Tensor> dispatch_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
+        if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && a->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_sum_axis_typed(a, dim, keepdim);
+#endif
+        return run_cpu_sum_axis_typed(a, dim, keepdim);
+    }
     if (!a->is_contiguous()) {
         a = a->contiguous();  // auto-materialize, matching torch's ergonomic sum() behavior
     }
@@ -537,6 +662,15 @@ static std::shared_ptr<Tensor> dispatch_sum_axis(std::shared_ptr<Tensor> a, int 
 }
 
 static std::shared_ptr<Tensor> dispatch_sum_all(std::shared_ptr<Tensor> a) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && a->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_sum_all_typed(a);
+#endif
+        return run_cpu_sum_all_typed(a);
+    }
     if (!a->is_contiguous()) {
         a = dispatch_contiguous(a);  // auto-materialize, matching torch's ergonomic sum() behavior
     }
@@ -832,7 +966,7 @@ PYBIND11_MODULE(_C, m) {
         .def("sigmoid", [](std::shared_ptr<Tensor> self) { return dispatch_sigmoid(self); })
         .def("tanh", [](std::shared_ptr<Tensor> self) { return dispatch_tanh(self); })
         .def("copy_", &Tensor::copy_)
-        .def("leaky_relu", [](std::shared_ptr<Tensor> self, float slope) { return dispatch_leaky_relu(self, slope); }, py::arg("slope") = 0.01f)
+        .def("leaky_relu", [](std::shared_ptr<Tensor> self, double slope) { return dispatch_leaky_relu(self, slope); }, py::arg("slope") = 0.01)
         .def("max", [](std::shared_ptr<Tensor> self, int dim, bool keepdim) {
             return dispatch_max_axis(self, dim, keepdim);
         }, py::arg("dim"), py::arg("keepdim") = false)
@@ -1015,39 +1149,46 @@ PYBIND11_MODULE(_C, m) {
         node->op_name = "getitem";
         auto orig_shape = self->shape;
         auto orig_device = self->device;
-        node->backward_fn = [orig_shape, orig_device, specs, new_shape](std::shared_ptr<Tensor> grad_out) {
-            // Scatter grad_out back into a zero tensor shaped like the
-            // original (pre-indexing) tensor. Every original element not
-            // covered by this indexing op correctly receives zero gradient.
-            auto grad_input = std::make_shared<Tensor>(orig_shape, orig_device);
-            grad_input->fill_zero();
+        auto self_dtype = self->dtype;
+        node->backward_fn = [orig_shape, orig_device, self_dtype, specs, new_shape](std::shared_ptr<Tensor> grad_out) {
+            auto grad_input = std::make_shared<Tensor>(orig_shape, orig_device, self_dtype);
+            grad_input->fill_zero_typed(self_dtype);
 
             size_t ndim_orig = orig_shape.size();
             size_t ndim_new = new_shape.size();
 
             int total_new = 1;
-            for (int s : new_shape) total_new *= s;  // == 1 if new_shape is empty (full-int case)
+            for (int s : new_shape) total_new *= s;
 
-            std::vector<int> new_idx(ndim_new, 0);
-            for (int flat = 0; flat < total_new; ++flat) {
-                float val = grad_out->get_scalar(new_idx);
+            auto scatter = [&](auto tag) {
+                using T = decltype(tag);
+                std::vector<int> new_idx(ndim_new, 0);
+                for (int flat = 0; flat < total_new; ++flat) {
+                    T val = grad_out->get_scalar_typed<T>(new_idx);
 
-                std::vector<int> orig_idx(ndim_orig);
-                size_t j = 0;  // walks new_idx in lockstep with the non-int original dims
-                for (size_t d = 0; d < ndim_orig; ++d) {
-                    if (specs[d].is_int) {
-                        orig_idx[d] = specs[d].int_index;
-                    } else {
-                        orig_idx[d] = specs[d].start + new_idx[j] * specs[d].step;
-                        ++j;
+                    std::vector<int> orig_idx(ndim_orig);
+                    size_t j = 0;
+                    for (size_t d = 0; d < ndim_orig; ++d) {
+                        if (specs[d].is_int) {
+                            orig_idx[d] = specs[d].int_index;
+                        } else {
+                            orig_idx[d] = specs[d].start + new_idx[j] * specs[d].step;
+                            ++j;
+                        }
+                    }
+                    grad_input->set_scalar_typed<T>(orig_idx, val);
+
+                    for (int d = (int)ndim_new - 1; d >= 0; --d) {
+                        if (++new_idx[d] < new_shape[d]) break;
+                        new_idx[d] = 0;
                     }
                 }
-                grad_input->set_scalar(orig_idx, val);
-
-                for (int d = (int)ndim_new - 1; d >= 0; --d) {
-                    if (++new_idx[d] < new_shape[d]) break;
-                    new_idx[d] = 0;
-                }
+            };
+            switch (self_dtype) {
+                case DType::FLOAT32: scatter(float{});   break;
+                case DType::FLOAT64: scatter(double{});  break;
+                case DType::INT32:   scatter(int32_t{}); break;
+                case DType::INT64:   scatter(int64_t{}); break;
             }
 
             return std::vector<std::shared_ptr<Tensor>>{grad_input};
@@ -1056,8 +1197,7 @@ PYBIND11_MODULE(_C, m) {
     }
 
     return py::cast(result);
-})
-        
+})      
         .def("__add__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_add(a, b); })
         .def("__add__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_add_scalar(a, s); })
         .def("__radd__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_add_scalar(a, s); })

@@ -150,6 +150,33 @@ public:
         static_cast<float*>(data_ptr)[off] = value;
     }
 
+    template <typename T>
+    T get_scalar_typed(const std::vector<int>& idx) {
+        int off = 0;
+        for (size_t i = 0; i < idx.size(); ++i) off += idx[i] * strides[i];
+        T value;
+    #ifndef AAKAAR_NO_CUDA
+        if (device == "cuda") {
+            cudaMemcpy(&value, static_cast<T*>(data_ptr) + off, sizeof(T), cudaMemcpyDeviceToHost);
+            return value;
+        }
+    #endif
+        return static_cast<T*>(data_ptr)[off];
+    }
+
+    template <typename T>
+    void set_scalar_typed(const std::vector<int>& idx, T value) {
+        int off = 0;
+        for (size_t i = 0; i < idx.size(); ++i) off += idx[i] * strides[i];
+    #ifndef AAKAAR_NO_CUDA
+        if (device == "cuda") {
+            cudaMemcpy(static_cast<T*>(data_ptr) + off, &value, sizeof(T), cudaMemcpyHostToDevice);
+            return;
+        }
+    #endif
+        static_cast<T*>(data_ptr)[off] = value;
+    }
+
     float get_scalar_flat(int flat_idx) {
         require_float32(dtype, "get_scalar_flat");
         std::vector<int> idx(shape.size());
@@ -172,6 +199,16 @@ public:
 #endif
         std::memset(data_ptr, 0, bytes);
     }
+    void fill_zero_typed(DType dt) {
+    size_t bytes = (size_t)size * dtype_size(dt);
+#ifndef AAKAAR_NO_CUDA
+    if (device == "cuda") {
+        cudaMemset(data_ptr, 0, bytes);
+        return;
+    }
+#endif
+    std::memset(data_ptr, 0, bytes);
+}
 
     float item() {
         require_float32(dtype, "item");
