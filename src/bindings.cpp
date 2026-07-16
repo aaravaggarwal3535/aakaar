@@ -1108,7 +1108,10 @@ PYBIND11_MODULE(_C, m) {
         .def_readonly("shape", &Tensor::shape)
         .def_readonly("strides", &Tensor::strides)
         .def_readwrite("requires_grad", &Tensor::requires_grad)
-        .def_readonly("grad", &Tensor::grad)
+        .def_property("grad",
+            [](Tensor &t) { return t.grad; },
+            [](Tensor &t, std::shared_ptr<Tensor> g) { t.grad = g; }
+        )
         .def("to_numpy", &Tensor::to_numpy)
         .def("is_contiguous", &Tensor::is_contiguous)
         .def("relu", [](std::shared_ptr<Tensor> self) { return dispatch_relu(self); })
@@ -1352,11 +1355,19 @@ PYBIND11_MODULE(_C, m) {
         .def("__radd__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_add_scalar(a, s); })
         .def("__sub__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_sub(a, b); })
         .def("__sub__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_sub_scalar(a, s); })
+        .def("__rsub__", [](std::shared_ptr<Tensor> a, float s) {
+            auto neg_a = dispatch_mul_scalar(a, -1.0f);
+            return dispatch_add_scalar(neg_a, s);
+        })
         .def("__mul__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_mul(a, b); })
         .def("__mul__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_mul_scalar(a, s); })
         .def("__rmul__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_mul_scalar(a, s); })
         .def("__truediv__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_div(a, b); })
         .def("__truediv__", [](std::shared_ptr<Tensor> a, float s) { return dispatch_div_scalar(a, s); })
+        .def("__rtruediv__", [](std::shared_ptr<Tensor> a, float s) {
+            auto s_tensor = dispatch_add_scalar(dispatch_mul_scalar(a, 0.0f), s);
+            return dispatch_div(s_tensor, a);
+        })
         .def("__matmul__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_matmul(a, b); })
         .def("sqrt", [](std::shared_ptr<Tensor> self) { return dispatch_sqrt(self); })
         .def("abs", [](std::shared_ptr<Tensor> self) { return dispatch_abs(self); });

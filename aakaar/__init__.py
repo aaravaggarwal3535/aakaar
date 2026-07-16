@@ -188,3 +188,17 @@ def synchronize():
     if _C.HAS_CUDA:
         _C._synchronize()
 
+def softmax(x, dim=-1):
+    m = x.max(dim=dim, keepdim=True)
+    shifted = x - m
+    exp_x = shifted.exp()
+    return exp_x / exp_x.sum(dim=dim, keepdim=True)
+
+def log_softmax(x, dim=-1):
+    """Numerically stable log(softmax(x)) — computes log-sum-exp using the
+    max-subtraction trick without materializing raw softmax probabilities
+    first (avoids exponentiating then re-logging, which loses precision)."""
+    m = x.max(dim=dim, keepdim=True)
+    shifted = x - m
+    log_sum_exp = shifted.exp().sum(dim=dim, keepdim=True).log()
+    return shifted - log_sum_exp

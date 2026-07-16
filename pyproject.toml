@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "A custom CUDA-accelerated ML library"
 readme = "README.md"
 authors = [{name = "Aarav Aggarwal"}]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "pandas",
