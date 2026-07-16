@@ -39,6 +39,7 @@ _add_windows_cuda_dll_dirs()
 _add_windows_openblas_dll_dir()
 
 from . import _C
+from .data import Dataset, TensorDataset, DataLoader
 import numpy as np
 
 def _normalize_shape(size):

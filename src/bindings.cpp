@@ -60,6 +60,8 @@ std::shared_ptr<Tensor> run_cpu_mul_scalar_typed(std::shared_ptr<Tensor> a, doub
 std::shared_ptr<Tensor> run_cpu_div_scalar_typed(std::shared_ptr<Tensor> a, double s);
 std::shared_ptr<Tensor> run_cpu_leaky_relu_typed(std::shared_ptr<Tensor> a, double slope);
 std::shared_ptr<Tensor> run_cpu_leaky_relu_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, double slope);
+std::shared_ptr<Tensor> run_cpu_matmul_f64(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+std::shared_ptr<Tensor> run_cpu_matmul_int_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 
 
 #ifndef AAKAAR_NO_CUDA
@@ -111,6 +113,8 @@ std::shared_ptr<Tensor> run_cuda_mul_scalar_typed(std::shared_ptr<Tensor> a, dou
 std::shared_ptr<Tensor> run_cuda_div_scalar_typed(std::shared_ptr<Tensor> a, double s);
 std::shared_ptr<Tensor> run_cuda_leaky_relu_typed(std::shared_ptr<Tensor> a, double slope);
 std::shared_ptr<Tensor> run_cuda_leaky_relu_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, double slope);
+std::shared_ptr<Tensor> run_cuda_matmul_f64(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+std::shared_ptr<Tensor> run_cuda_matmul_int_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
 void empty_cache() { CachingAllocator::get_instance().empty_cache(); }
 #endif
 
@@ -897,13 +901,40 @@ static std::shared_ptr<Tensor> dispatch_div(std::shared_ptr<Tensor> a, std::shar
 }
 
 static std::shared_ptr<Tensor> dispatch_matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    // 1. Float64 Execution Path (No Autograd Support)
+    if (a->dtype == DType::FLOAT64) {
+        if (g_grad_enabled && (a->requires_grad || b->requires_grad)) {
+            throw std::runtime_error("Autograd is not yet supported for dtype 'float64'. "
+                                     "Only float32 currently supports gradients.");
+        }
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_matmul_f64(a, b);
+#endif
+        return run_cpu_matmul_f64(a, b);
+    }
+
+    // 2. Updated Integer Execution Path (No Autograd Support)
+    if (a->dtype == DType::INT32 || a->dtype == DType::INT64) {
+        if (g_grad_enabled && (a->requires_grad || b->requires_grad)) {
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + 
+                                     dtype_name(a->dtype) + "'. Only float32 currently supports gradients.");
+        }
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_matmul_int_typed(a, b);
+#endif
+        return run_cpu_matmul_int_typed(a, b);
+    }
+
+    // 3. Existing Float32 Execution Path
     std::shared_ptr<Tensor> result;
 #ifndef AAKAAR_NO_CUDA
-    if (a->device == "cuda") result = run_cublas_matmul(a, b);
+    if (a->device == "cuda")
+        result = run_cublas_matmul(a, b);
     else
 #endif
-    result = run_cpu_matmul(a, b);
+        result = run_cpu_matmul(a, b);
 
+    // 4. Float32 Autograd Graph Construction
     if (g_grad_enabled && (a->requires_grad || b->requires_grad)) {
         result->requires_grad = true;
         auto node = std::make_shared<Node>();
@@ -924,20 +955,47 @@ static std::shared_ptr<Tensor> dispatch_matmul(std::shared_ptr<Tensor> a, std::s
             // can differ due to broadcasting.
             auto da = reduce_grad_to_shape(da_full, a->shape, 2);
             auto db = reduce_grad_to_shape(db_full, b->shape, 2);
+
             return std::vector<std::shared_ptr<Tensor>>{da, db};
         };
         result->grad_fn = node;
     }
+
     return result;
 }
-static std::shared_ptr<Tensor> tensor_from_numpy(py::array_t<float, py::array::c_style | py::array::forcecast> arr,
-                                                  std::string device, bool requires_grad) {
+
+static std::shared_ptr<Tensor> tensor_from_numpy_typed(py::array arr, std::string device, bool requires_grad) {
     py::buffer_info buf = arr.request();
     std::vector<int> shape;
     for (auto d : buf.shape) shape.push_back((int)d);
-    if (shape.empty()) shape.push_back(1);  // treat a numpy scalar as a size-1 tensor
+    if (shape.empty()) shape.push_back(1);
+    py::dtype np_dtype = arr.dtype();
+    char kind = np_dtype.kind();
+    py::ssize_t itemsize = np_dtype.itemsize();
 
-    auto result = Tensor::from_buffer(static_cast<const float*>(buf.ptr), shape, device);
+    DType dt;
+    if (kind == 'f' && itemsize == 4) dt = DType::FLOAT32;
+    else if (kind == 'f' && itemsize == 8) dt = DType::FLOAT64;
+    else if (kind == 'i' && itemsize == 4) dt = DType::INT32;
+    else if (kind == 'i' && itemsize == 8) dt = DType::INT64;
+    else throw std::runtime_error("from_numpy(): unsupported numpy dtype (kind='" +
+                                   std::string(1, kind) + "', itemsize=" + std::to_string(itemsize) +
+                                   "). Supported: float32, float64, int32, int64.");
+
+    auto result = std::make_shared<Tensor>(shape, device, dt);
+    size_t bytes = (size_t)result->size * dtype_size(dt);
+
+    py::array contiguous_arr = py::array::ensure(arr, py::array::c_style | py::array::forcecast);
+    py::buffer_info cbuf = contiguous_arr.request();
+
+#ifndef AAKAAR_NO_CUDA
+    if (device == "cuda") {
+        cudaMemcpy(result->data_ptr, cbuf.ptr, bytes, cudaMemcpyHostToDevice);
+        result->requires_grad = requires_grad;
+        return result;
+    }
+#endif
+    std::memcpy(result->data_ptr, cbuf.ptr, bytes);
     result->requires_grad = requires_grad;
     return result;
 }
@@ -1218,10 +1276,9 @@ PYBIND11_MODULE(_C, m) {
     m.def("cpu_matmul", &dispatch_matmul, "CPU matrix multiplication (autograd-aware)");
     m.def("cpu_add", &dispatch_add);
     m.def("cpu_sub", &dispatch_sub);
-    m.def("from_numpy", &tensor_from_numpy,
-          py::arg("array"), py::arg("device") = "cpu", py::arg("requires_grad") = false,
-          "Create a Tensor from an existing numpy array, copying its data.");
-    m.def("_openblas_diagnostic", &get_openblas_diagnostic);
+    m.def("from_numpy", &tensor_from_numpy_typed,
+      py::arg("array"), py::arg("device") = "cpu", py::arg("requires_grad") = false,
+      "Create a Tensor from an existing numpy array, preserving its dtype (float32/float64/int32/int64).");
     m.def("is_available", &cuda_is_available, "Check if a CUDA-capable GPU is actually present and usable");
     m.def("device_count", &cuda_device_count, "Number of CUDA-capable GPUs detected");
     

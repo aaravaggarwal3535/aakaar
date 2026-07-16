@@ -829,3 +829,137 @@ std::shared_ptr<Tensor> run_cpu_leaky_relu_backward_typed(std::shared_ptr<Tensor
         default: throw std::runtime_error("leaky_relu() backward: unsupported dtype '" + dtype_name(input->dtype) + "'");
     }
 }
+
+std::shared_ptr<Tensor> run_cpu_matmul_f64(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (!a->is_contiguous() || !b->is_contiguous())
+        throw std::invalid_argument("matmul requires contiguous tensors. Call .contiguous() first.");
+
+    auto batch_dims = [](const std::vector<int>& s) { return std::vector<int>(s.begin(), s.end()-2); };
+    int M = a->shape[a->shape.size()-2], K = a->shape.back();
+    int K2 = b->shape[b->shape.size()-2], N = b->shape.back();
+    if (K != K2) throw std::invalid_argument("Shape mismatch: inner dimensions must match");
+
+    auto ba = batch_dims(a->shape), bb = batch_dims(b->shape);
+    int ndb = std::max(ba.size(), bb.size());
+    std::vector<int> out_batch(ndb);
+    for (int i = 0; i < ndb; ++i) {
+        int da = i < (int)ba.size() ? ba[ba.size()-1-i] : 1;
+        int db = i < (int)bb.size() ? bb[bb.size()-1-i] : 1;
+        if (da != db && da != 1 && db != 1)
+            throw std::invalid_argument("Batch dimensions are not broadcastable for matmul");
+        out_batch[ndb-1-i] = std::max(da, db);
+    }
+    int total_batch = 1;
+    for (int d : out_batch) total_batch *= d;
+
+    std::vector<int> out_shape = out_batch;
+    out_shape.push_back(M); out_shape.push_back(N);
+    auto result = std::make_shared<Tensor>(out_shape, std::string("cpu"), DType::FLOAT64);
+
+    auto compute_offset = [&](int flat_idx, const std::vector<int>& in_shape, int mat_size) {
+        auto in_batch = batch_dims(in_shape);
+        int nd_in = (int)in_batch.size();
+        std::vector<int> idx(ndb);
+        int rem = flat_idx;
+        for (int i = ndb - 1; i >= 0; --i) { idx[i] = rem % out_batch[i]; rem /= out_batch[i]; }
+        long long off = 0, stride = mat_size;
+        for (int i = ndb - 1; i >= 0; --i) {
+            int in_i = i - (ndb - nd_in);
+            int in_dim = in_i >= 0 ? in_batch[in_i] : 1;
+            int use_idx = (in_dim == 1) ? 0 : idx[i];
+            if (in_i >= 0) { off += (long long)use_idx * stride; stride *= in_dim; }
+        }
+        return (int)off;
+    };
+
+    const double* a_base = static_cast<const double*>(a->data_ptr);
+    const double* b_base = static_cast<const double*>(b->data_ptr);
+    double* c_base = static_cast<double*>(result->data_ptr);
+
+    for (int bi = 0; bi < total_batch; ++bi) {
+        const double* ap = a_base + compute_offset(bi, a->shape, M*K);
+        const double* bp = b_base + compute_offset(bi, b->shape, K*N);
+        double* cp = c_base + bi * M * N;
+
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    M, N, K,
+                    1.0, ap, K,
+                    bp, N,
+                    0.0, cp, N);
+    }
+    return result;
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cpu_matmul_int_typed_impl(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b, DType out_dtype) {
+    if (!a->is_contiguous() || !b->is_contiguous())
+        throw std::invalid_argument("matmul requires contiguous tensors. Call .contiguous() first.");
+
+    auto batch_dims_fn = [](const std::vector<int>& s) { return std::vector<int>(s.begin(), s.end()-2); };
+    int M = a->shape[a->shape.size()-2], K = a->shape.back();
+    int K2 = b->shape[b->shape.size()-2], N = b->shape.back();
+    if (K != K2) throw std::invalid_argument("Shape mismatch: inner dimensions must match");
+
+    auto ba = batch_dims_fn(a->shape), bb = batch_dims_fn(b->shape);
+    int ndb = std::max(ba.size(), bb.size());
+    std::vector<int> out_batch(ndb);
+    for (int i = 0; i < ndb; ++i) {
+        int da = i < (int)ba.size() ? ba[ba.size()-1-i] : 1;
+        int db = i < (int)bb.size() ? bb[bb.size()-1-i] : 1;
+        if (da != db && da != 1 && db != 1)
+            throw std::invalid_argument("Batch dimensions are not broadcastable for matmul");
+        out_batch[ndb-1-i] = std::max(da, db);
+    }
+    int total_batch = 1;
+    for (int d : out_batch) total_batch *= d;
+
+    std::vector<int> out_shape = out_batch;
+    out_shape.push_back(M); out_shape.push_back(N);
+    auto result = std::make_shared<Tensor>(out_shape, std::string("cpu"), out_dtype);
+
+    auto compute_offset = [&](int flat_idx, const std::vector<int>& in_shape, int mat_size) {
+        auto in_batch = batch_dims_fn(in_shape);
+        int nd_in = (int)in_batch.size();
+        std::vector<int> idx(ndb);
+        int rem = flat_idx;
+        for (int i = ndb - 1; i >= 0; --i) { idx[i] = rem % out_batch[i]; rem /= out_batch[i]; }
+        long long off = 0, stride = mat_size;
+        for (int i = ndb - 1; i >= 0; --i) {
+            int in_i = i - (ndb - nd_in);
+            int in_dim = in_i >= 0 ? in_batch[in_i] : 1;
+            int use_idx = (in_dim == 1) ? 0 : idx[i];
+            if (in_i >= 0) { off += (long long)use_idx * stride; stride *= in_dim; }
+        }
+        return (int)off;
+    };
+
+    const T* a_base = static_cast<const T*>(a->data_ptr);
+    const T* b_base = static_cast<const T*>(b->data_ptr);
+    T* c_base = static_cast<T*>(result->data_ptr);
+
+    for (int bi = 0; bi < total_batch; ++bi) {
+        const T* ap = a_base + compute_offset(bi, a->shape, M*K);
+        const T* bp = b_base + compute_offset(bi, b->shape, K*N);
+        T* cp = c_base + bi * M * N;
+
+        #pragma omp parallel for
+        for (int i = 0; i < M; ++i) {
+            for (int j = 0; j < N; ++j) {
+                int64_t acc = 0;
+                for (int k = 0; k < K; ++k) {
+                    acc += (int64_t)ap[(long long)i * K + k] * (int64_t)bp[(long long)k * N + j];
+                }
+                cp[(long long)i * N + j] = (T)acc;
+            }
+        }
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_matmul_int_typed(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    switch (a->dtype) {
+        case DType::INT32: return run_cpu_matmul_int_typed_impl<int32_t>(a, b, DType::INT32);
+        case DType::INT64: return run_cpu_matmul_int_typed_impl<int64_t>(a, b, DType::INT64);
+        default: throw std::runtime_error("matmul(): unsupported integer dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
