@@ -48,10 +48,8 @@ class Resize:
 
 class RandomCrop:
     """Crops a random `size x size` (or (h,w)) region, padding first if the
-    source is smaller than the crop size (torchvision default: reflect
-    padding is NOT replicated here — this pads with zeros/edge instead,
-    a real, stated simplification vs. torchvision's more flexible padding
-    modes)."""
+    source is smaller than the crop size, this pads with zeros/edge instead,
+    a real."""
 
     def __init__(self, size, padding=0):
         self.size = size if isinstance(size, tuple) else (size, size)
@@ -177,8 +175,7 @@ class RandomAffine:
         return np.array(warped)
 
 class ColorJitter:
-    """Randomly adjusts brightness/contrast/saturation/hue, in that order
-    (matching torchvision's default order), each within +-factor of 1.0.
+    """Randomly adjusts brightness/contrast/saturation/hue, in that order, each within +-factor of 1.0.
     Operates on float [0,1] arrays internally regardless of input dtype."""
 
     def __init__(self, brightness=0, contrast=0, saturation=0, hue=0):
@@ -251,8 +248,6 @@ class ColorJitter:
 
 class RandomErasing:
     """Randomly erases a rectangular region, filling with random noise
-    (torchvision default) or a constant value. Operates on the array
-    AFTER ToTensor (CHW format) to match torchvision's placement in the
     pipeline (RandomErasing is typically applied post-ToTensor)."""
 
     def __init__(self, p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0):
