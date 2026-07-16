@@ -963,3 +963,83 @@ std::shared_ptr<Tensor> run_cpu_matmul_int_typed(std::shared_ptr<Tensor> a, std:
         default: throw std::runtime_error("matmul(): unsupported integer dtype '" + dtype_name(a->dtype) + "'");
     }
 }
+// ---- sqrt (float32 native + float64 typed) ----
+std::shared_ptr<Tensor> run_cpu_sqrt(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) result->fptr()[i] = std::sqrt(a->get_scalar_flat(i));
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_sqrt_backward(std::shared_ptr<Tensor> grad_out, const float* sqrt_out_ptr, int size, std::vector<int> shape) {
+    auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
+    for (int i = 0; i < size; ++i) {
+        float y = sqrt_out_ptr[i];
+        result->fptr()[i] = grad_out->fptr()[i] * 0.5f / y;
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_sqrt_f64(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"), DType::FLOAT64);
+    const double* ap = static_cast<const double*>(a->data_ptr);
+    double* rp = static_cast<double*>(result->data_ptr);
+    for (int i = 0; i < a->size; ++i) rp[i] = std::sqrt(ap[i]);
+    return result;
+}
+
+// ---- abs (float32 native + typed float64/int32/int64) ----
+std::shared_ptr<Tensor> run_cpu_abs(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    for (int i = 0; i < a->size; ++i) result->fptr()[i] = std::fabs(a->get_scalar_flat(i));
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_abs_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
+    for (int i = 0; i < input->size; ++i) {
+        float x = input->get_scalar_flat(i);
+        float sign = (x > 0.0f) ? 1.0f : (x < 0.0f) ? -1.0f : 0.0f;  // torch convention: grad at 0 is 0
+        result->fptr()[i] = grad_out->fptr()[i] * sign;
+    }
+    return result;
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cpu_abs_typed_impl(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"), a->dtype);
+    const T* ap = static_cast<const T*>(a->data_ptr);
+    T* rp = static_cast<T*>(result->data_ptr);
+    for (int i = 0; i < a->size; ++i) {
+        T v = ap[i];
+        rp[i] = v < T(0) ? -v : v;
+    }
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_abs_typed(std::shared_ptr<Tensor> a) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_abs_typed_impl<double>(a);
+        case DType::INT32:   return run_cpu_abs_typed_impl<int32_t>(a);
+        case DType::INT64:   return run_cpu_abs_typed_impl<int64_t>(a);
+        default: throw std::runtime_error("abs(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cpu_abs_backward_typed_impl(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"), input->dtype);
+    const T* gop = static_cast<const T*>(grad_out->data_ptr);
+    const T* ip = static_cast<const T*>(input->data_ptr);
+    T* rp = static_cast<T*>(result->data_ptr);
+    for (int i = 0; i < input->size; ++i) {
+        T x = ip[i];
+        T sign = x > T(0) ? T(1) : (x < T(0) ? T(-1) : T(0));
+        rp[i] = gop[i] * sign;
+    }
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_abs_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    switch (input->dtype) {
+        case DType::FLOAT64: return run_cpu_abs_backward_typed_impl<double>(grad_out, input);
+        case DType::INT32:   return run_cpu_abs_backward_typed_impl<int32_t>(grad_out, input);
+        case DType::INT64:   return run_cpu_abs_backward_typed_impl<int64_t>(grad_out, input);
+        default: throw std::runtime_error("abs() backward: unsupported dtype '" + dtype_name(input->dtype) + "'");
+    }
+}

@@ -281,3 +281,59 @@ setup(
     install_requires=["numpy"],
     setup_requires=["pybind11"],
 )
+
+def log_softmax(x, dim=-1):
+    """Numerically stable log(softmax(x)) — computes log-sum-exp using the
+    max-subtraction trick without ever materializing the (potentially huge
+    or tiny) raw softmax probabilities first."""
+    m = x.max(dim=dim, keepdim=True)
+    shifted = x - m
+    log_sum_exp = shifted.exp().sum(dim=dim, keepdim=True).log()
+    return shifted - log_sum_exp
+
+
+def nll_loss(log_probs, target_onehot):
+    """Negative log likelihood given log-probabilities (e.g. from
+    log_softmax) and one-hot targets. Matches torch.nn.functional.nll_loss
+    semantics but takes one-hot targets rather than integer class indices,
+    since aakaar has no gather/fancy-indexing op yet (see cross_entropy)."""
+    return -(target_onehot * log_probs).sum() / log_probs.shape[0]
+
+
+def cross_entropy(logits, target_onehot):
+    """Numerically stable cross-entropy from raw logits — computes
+    log_softmax internally rather than softmax-then-log (avoids the
+    precision loss of exponentiating then re-logging). This is the
+    torch-equivalent-signature version; cross_entropy_from_probs (above,
+    already in this file) stays available for callers who already have
+    probabilities.
+
+    NOTE: takes one-hot targets, not integer class-index targets like
+    torch.nn.functional.cross_entropy — aakaar has no gather/fancy-indexing
+    operation yet to select log_probs[i, target[i]] directly. Convert
+    integer labels to one-hot first (see one_hot() pattern in examples)."""
+    return nll_loss(log_softmax(logits, dim=-1), target_onehot)
+
+
+def l1_loss(pred, target):
+    """Mean absolute error. NOTE: aakaar has no abs() yet — implemented via
+    sqrt(x^2 + eps) is a bad idea (biases small errors); the honest
+    implementation needs a real elementwise abs(). Flagged as blocked,
+    same as Adam above, rather than faked."""
+    raise NotImplementedError(
+        "l1_loss requires an elementwise abs() operation, which doesn't exist "
+        "in aakaar yet. This is a real, tracked gap — not implemented here to "
+        "avoid a numerically incorrect approximation (e.g. sqrt(x^2) has poor "
+        "gradient behavior near zero)."
+    )
+
+
+def binary_cross_entropy_with_logits(logits, target):
+    """Numerically stable BCE from raw logits, using the standard
+    log-sum-exp reformulation: max(x,0) - x*target + log(1+exp(-|x|)).
+    NOTE: this needs elementwise abs() for the |x| term and doesn't have
+    one yet either — same gap as l1_loss. Flagged rather than faked."""
+    raise NotImplementedError(
+        "binary_cross_entropy_with_logits requires elementwise abs(), which "
+        "doesn't exist in aakaar yet. Tracked gap, not implemented here."
+    )

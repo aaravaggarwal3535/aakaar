@@ -1429,3 +1429,283 @@ std::shared_ptr<Tensor> run_cuda_leaky_relu_backward_typed(std::shared_ptr<Tenso
         default: throw std::runtime_error("leaky_relu() backward: unsupported dtype '" + dtype_name(input->dtype) + "'");
     }
 }
+
+__global__ void sqrt_forward_kernel(const float* __restrict__ in, float* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    // Vectorized 128-bit loads/stores
+    int n4 = n / 4;
+    const float4* in_vec = reinterpret_cast<const float4*>(in);
+    float4* out_vec = reinterpret_cast<float4*>(out);
+    
+    for (int i = idx; i < n4; i += stride) {
+        float4 val = __ldg(&in_vec[i]);
+        float4 res;
+        res.x = sqrtf(val.x);
+        res.y = sqrtf(val.y);
+        res.z = sqrtf(val.z);
+        res.w = sqrtf(val.w);
+        out_vec[i] = res;
+    }
+    
+    // Tail handling
+    for (int i = n4 * 4 + idx; i < n; i += stride) {
+        out[i] = sqrtf(__ldg(&in[i]));
+    }
+}
+
+__global__ void sqrt_backward_kernel(const float* __restrict__ grad_out, const float* __restrict__ sqrt_out,
+                                      float* __restrict__ grad_in, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    int n4 = n / 4;
+    const float4* go_vec = reinterpret_cast<const float4*>(grad_out);
+    const float4* so_vec = reinterpret_cast<const float4*>(sqrt_out);
+    float4* gi_vec = reinterpret_cast<float4*>(grad_in);
+    
+    for (int i = idx; i < n4; i += stride) {
+        float4 go = __ldg(&go_vec[i]);
+        float4 so = __ldg(&so_vec[i]);
+        float4 gi;
+        gi.x = go.x * 0.5f / so.x;
+        gi.y = go.y * 0.5f / so.y;
+        gi.z = go.z * 0.5f / so.z;
+        gi.w = go.w * 0.5f / so.w;
+        gi_vec[i] = gi;
+    }
+    
+    for (int i = n4 * 4 + idx; i < n; i += stride) {
+        grad_in[i] = __ldg(&grad_out[i]) * 0.5f / __ldg(&sqrt_out[i]);
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_sqrt(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) throw std::invalid_argument("sqrt requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
+    int n = a->size;
+    if (n == 0) return result;
+    
+    // Dividing by 4 for the primary loop blocks, standard blocks for tail
+    sqrt_forward_kernel<<<elem_blocks(n), 256>>>(a->fptr(), result->fptr(), n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_sqrt_backward(std::shared_ptr<Tensor> grad_out, const float* sqrt_out_ptr, int size, std::vector<int> shape) {
+    auto result = std::make_shared<Tensor>(shape, std::string("cuda"));
+    if (size == 0) return result;
+    sqrt_backward_kernel<<<elem_blocks(size), 256>>>(grad_out->fptr(), sqrt_out_ptr, result->fptr(), size);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+__global__ void sqrt_f64_kernel(const double* __restrict__ in, double* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    // double2 is 128-bit aligned
+    int n2 = n / 2;
+    const double2* in_vec = reinterpret_cast<const double2*>(in);
+    double2* out_vec = reinterpret_cast<double2*>(out);
+    
+    for (int i = idx; i < n2; i += stride) {
+        double2 val = __ldg(&in_vec[i]);
+        double2 res;
+        res.x = sqrt(val.x);
+        res.y = sqrt(val.y);
+        out_vec[i] = res;
+    }
+    
+    for (int i = n2 * 2 + idx; i < n; i += stride) {
+        out[i] = sqrt(__ldg(&in[i]));
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_sqrt_f64(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) throw std::invalid_argument("sqrt requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"), DType::FLOAT64);
+    int n = a->size;
+    if (n == 0) return result;
+    sqrt_f64_kernel<<<elem_blocks(n), 256>>>(
+        static_cast<const double*>(a->data_ptr), static_cast<double*>(result->data_ptr), n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+// ---- abs: float32 native + typed float64/int32/int64 ----
+__global__ void abs_forward_kernel(const float* __restrict__ in, float* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    int n4 = n / 4;
+    const float4* in_vec = reinterpret_cast<const float4*>(in);
+    float4* out_vec = reinterpret_cast<float4*>(out);
+    
+    for (int i = idx; i < n4; i += stride) {
+        float4 val = __ldg(&in_vec[i]);
+        float4 res;
+        res.x = fabsf(val.x);
+        res.y = fabsf(val.y);
+        res.z = fabsf(val.z);
+        res.w = fabsf(val.w);
+        out_vec[i] = res;
+    }
+    
+    for (int i = n4 * 4 + idx; i < n; i += stride) {
+        out[i] = fabsf(__ldg(&in[i]));
+    }
+}
+
+__global__ void abs_backward_kernel(const float* __restrict__ grad_out, const float* __restrict__ input,
+                                     float* __restrict__ grad_in, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    int n4 = n / 4;
+    const float4* go_vec = reinterpret_cast<const float4*>(grad_out);
+    const float4* in_vec = reinterpret_cast<const float4*>(input);
+    float4* gi_vec = reinterpret_cast<float4*>(grad_in);
+    
+    for (int i = idx; i < n4; i += stride) {
+        float4 go = __ldg(&go_vec[i]);
+        float4 in_val = __ldg(&in_vec[i]);
+        float4 gi;
+        // Branchless sign extraction evaluates cleanly in PTX
+        gi.x = go.x * ((in_val.x > 0.0f) - (in_val.x < 0.0f));
+        gi.y = go.y * ((in_val.y > 0.0f) - (in_val.y < 0.0f));
+        gi.z = go.z * ((in_val.z > 0.0f) - (in_val.z < 0.0f));
+        gi.w = go.w * ((in_val.w > 0.0f) - (in_val.w < 0.0f));
+        gi_vec[i] = gi;
+    }
+    
+    for (int i = n4 * 4 + idx; i < n; i += stride) {
+        float x = __ldg(&input[i]);
+        grad_in[i] = __ldg(&grad_out[i]) * ((x > 0.0f) - (x < 0.0f));
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_abs(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) throw std::invalid_argument("abs requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
+    int n = a->size;
+    if (n == 0) return result;
+    abs_forward_kernel<<<elem_blocks(n), 256>>>(a->fptr(), result->fptr(), n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_abs_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cuda"));
+    int n = input->size;
+    if (n == 0) return result;
+    abs_backward_kernel<<<elem_blocks(n), 256>>>(grad_out->fptr(), input->fptr(), result->fptr(), n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+template <typename T>
+__global__ void abs_scalar_kernel_typed(const T* __restrict__ in, T* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    // Manual loop unrolling (ILP) to optimize throughput for generic types
+    int i = idx;
+    int stride4 = stride * 4;
+    
+    for (; i <= n - stride4; i += stride4) {
+        T v0 = __ldg(&in[i]);
+        T v1 = __ldg(&in[i + stride]);
+        T v2 = __ldg(&in[i + stride * 2]);
+        T v3 = __ldg(&in[i + stride * 3]);
+        
+        out[i] = v0 < T(0) ? -v0 : v0;
+        out[i + stride] = v1 < T(0) ? -v1 : v1;
+        out[i + stride * 2] = v2 < T(0) ? -v2 : v2;
+        out[i + stride * 3] = v3 < T(0) ? -v3 : v3;
+    }
+    
+    // Tail
+    for (; i < n; i += stride) {
+        T v = __ldg(&in[i]);
+        out[i] = v < T(0) ? -v : v;
+    }
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cuda_abs_typed_impl(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"), a->dtype);
+    int n = a->size;
+    if (n == 0) return result;
+    abs_scalar_kernel_typed<T><<<elem_blocks(n), 256>>>(
+        static_cast<const T*>(a->data_ptr), static_cast<T*>(result->data_ptr), n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_abs_typed(std::shared_ptr<Tensor> a) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cuda_abs_typed_impl<double>(a);
+        case DType::INT32:   return run_cuda_abs_typed_impl<int32_t>(a);
+        case DType::INT64:   return run_cuda_abs_typed_impl<int64_t>(a);
+        default: throw std::runtime_error("abs(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}
+
+template <typename T>
+__global__ void abs_backward_scalar_kernel_typed(const T* __restrict__ grad_out, const T* __restrict__ input,
+                                                  T* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    // Unrolled x4 & Branchless evaluation
+    int i = idx;
+    int stride4 = stride * 4;
+    
+    for (; i <= n - stride4; i += stride4) {
+        T i0 = __ldg(&input[i]);
+        T i1 = __ldg(&input[i + stride]);
+        T i2 = __ldg(&input[i + stride * 2]);
+        T i3 = __ldg(&input[i + stride * 3]);
+
+        out[i] = __ldg(&grad_out[i]) * ((i0 > T(0)) - (i0 < T(0)));
+        out[i + stride] = __ldg(&grad_out[i + stride]) * ((i1 > T(0)) - (i1 < T(0)));
+        out[i + stride * 2] = __ldg(&grad_out[i + stride * 2]) * ((i2 > T(0)) - (i2 < T(0)));
+        out[i + stride * 3] = __ldg(&grad_out[i + stride * 3]) * ((i3 > T(0)) - (i3 < T(0)));
+    }
+    
+    // Tail
+    for (; i < n; i += stride) {
+        T x = __ldg(&input[i]);
+        out[i] = __ldg(&grad_out[i]) * ((x > T(0)) - (x < T(0)));
+    }
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cuda_abs_backward_typed_impl(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    auto result = std::make_shared<Tensor>(input->shape, std::string("cuda"), input->dtype);
+    int n = input->size;
+    if (n == 0) return result;
+    abs_backward_scalar_kernel_typed<T><<<elem_blocks(n), 256>>>(
+        static_cast<const T*>(grad_out->data_ptr), static_cast<const T*>(input->data_ptr),
+        static_cast<T*>(result->data_ptr), n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cuda_abs_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
+    switch (input->dtype) {
+        case DType::FLOAT64: return run_cuda_abs_backward_typed_impl<double>(grad_out, input);
+        case DType::INT32:   return run_cuda_abs_backward_typed_impl<int32_t>(grad_out, input);
+        case DType::INT64:   return run_cuda_abs_backward_typed_impl<int64_t>(grad_out, input);
+        default: throw std::runtime_error("abs() backward: unsupported dtype '" + dtype_name(input->dtype) + "'");
+    }
+}
