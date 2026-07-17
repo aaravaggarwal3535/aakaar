@@ -9,6 +9,7 @@ def _add_windows_cuda_dll_dirs():
         return
     import site
     search_roots = site.getsitepackages() + [site.getusersitepackages()]
+    found_any = False
     for root in search_roots:
         nvidia_root = os.path.join(root, "nvidia")
         if not os.path.isdir(nvidia_root):
@@ -18,10 +19,29 @@ def _add_windows_cuda_dll_dirs():
                 consolidated_bin = os.path.join(nvidia_root, entry, "bin", "x86_64")
                 if os.path.isdir(consolidated_bin):
                     os.add_dll_directory(consolidated_bin)
-        for pkg in ("cuda_runtime", "curand", "cublas", "cuda_nvrtc"):
+                    found_any = True
+        for pkg in ("cuda_runtime", "curand", "cublas", "cuda_nvrtc", "cudnn"):
             bin_dir = os.path.join(nvidia_root, pkg, "bin")
             if os.path.isdir(bin_dir):
                 os.add_dll_directory(bin_dir)
+                found_any = True
+    # Also check the system CUDA toolkit / standalone cuDNN install, in case
+    # the user installed those instead of the pip packages.
+    cuda_home = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME")
+    if cuda_home and os.path.isdir(os.path.join(cuda_home, "bin")):
+        os.add_dll_directory(os.path.join(cuda_home, "bin"))
+        found_any = True
+    nvidia_cudnn_root = r"C:\Program Files\NVIDIA\CUDNN"
+    if os.path.isdir(nvidia_cudnn_root):
+        for entry in os.listdir(nvidia_cudnn_root):
+            bin_base = os.path.join(nvidia_cudnn_root, entry, "bin")
+            if os.path.isdir(bin_base):
+                for sub in os.listdir(bin_base):
+                    full = os.path.join(bin_base, sub)
+                    if os.path.isdir(full):
+                        os.add_dll_directory(full)
+                        found_any = True
+    return found_any
 
 def _add_windows_openblas_dll_dir():
     if sys.platform != "win32":
@@ -35,8 +55,35 @@ def _add_windows_openblas_dll_dir():
     if os.path.isdir(dev_bin):
         os.add_dll_directory(dev_bin)
 
+def _preload_linux_cuda_libs():
+    if sys.platform != "linux":
+        return
+    import ctypes, glob, site
+    failures = []
+    for root in site.getsitepackages() + [site.getusersitepackages()]:
+        nvidia_root = os.path.join(root, "nvidia")
+        if not os.path.isdir(nvidia_root):
+            continue
+        for pkg in ("cuda_runtime", "cublas", "cudnn", "curand"):
+            lib_dir = os.path.join(nvidia_root, pkg, "lib")
+            if not os.path.isdir(lib_dir):
+                continue
+            for so_path in sorted(glob.glob(os.path.join(lib_dir, "lib*.so*"))):
+                try:
+                    ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL)
+                except OSError as e:
+                    failures.append((so_path, str(e)))
+    if failures:
+        import warnings
+        warnings.warn(
+            f"aakaar: {len(failures)} CUDA library file(s) failed to preload: "
+            f"{[f[0] for f in failures]}. GPU features may not work. "
+            f"First error: {failures[0][1]}"
+        )
+
 _add_windows_cuda_dll_dirs()
 _add_windows_openblas_dll_dir()
+_preload_linux_cuda_libs()
 
 from . import _C
 from .data import Dataset, TensorDataset, DataLoader
@@ -202,3 +249,38 @@ def log_softmax(x, dim=-1):
     shifted = x - m
     log_sum_exp = shifted.exp().sum(dim=dim, keepdim=True).log()
     return shifted - log_sum_exp
+
+def im2col_1d(x, kernel_size, stride, padding, dilation, out_length):
+    """Unfolds a (B, C, L) tensor into (B, C*kernel_size, L_out) sliding windows.
+    Internal primitive used by nn.Conv1d — not usually called directly."""
+    return _C.im2col_1d(x, kernel_size, stride, padding, dilation, out_length)
+def conv1d(x, weight, stride=1, padding=0, dilation=1):
+    """Fastest available Conv1d forward+backward. Routes to cuDNN for
+    float32 CUDA tensors (matches torch's actual backend); falls back to
+    im2col + matmul (cuBLAS/OpenBLAS) for CPU tensors or float64/int32/int64,
+    which cuDNN doesn't support well or at all."""
+    use_cudnn = (_C.HAS_CUDA and x.device == "cuda" and weight.device == "cuda"
+                 and x.dtype == "float32" and weight.dtype == "float32")
+    if use_cudnn:
+        return _C.conv1d_cudnn(x, weight, stride, padding, dilation)
+
+    C_out, C_in, K = weight.shape
+    B, _, L_in = x.shape
+    L_out = (L_in + 2 * padding - dilation * (K - 1) - 1) // stride + 1
+    if L_out <= 0:
+        raise ValueError(f"conv1d: computed output length {L_out} <= 0")
+    col = im2col_1d(x, K, stride, padding, dilation, L_out)
+    w_flat = weight.reshape([C_out, C_in * K]).reshape([1, C_out, C_in * K])
+    return matmul(w_flat, col)
+
+def set_cudnn_tf32(enabled: bool = True):
+    """Enable/disable TF32 tensor-core math for cuDNN convolutions (Ampere+).
+    Matches torch's torch.backends.cudnn.allow_tf32, which defaults to True.
+    Trades a small amount of precision for significant speed on conv ops —
+    same trade torch makes by default. Set to False if you need exact
+    float32 precision and can accept the speed cost."""
+    if _C.HAS_CUDA:
+        _C._set_cudnn_tf32_enabled(enabled)
+
+def is_cudnn_tf32_enabled():
+    return _C._get_cudnn_tf32_enabled() if _C.HAS_CUDA else False

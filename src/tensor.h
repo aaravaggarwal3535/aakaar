@@ -18,6 +18,22 @@ namespace py = pybind11;
 
 class Tensor;
 
+// --- conv1d (im2col/col2im) ---
+void run_cpu_im2col_1d(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> col,
+                        int K, int S, int P, int D, int L_out);
+void run_cpu_col2im_1d(std::shared_ptr<Tensor> grad_col, std::shared_ptr<Tensor> grad_x,
+                        int B, int C, int L_in, int K, int S, int P, int D, int L_out);
+void run_cpu_im2col_1d_typed(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> col,
+                              int K, int S, int P, int D, int L_out);
+#ifndef AAKAAR_NO_CUDA
+void run_cuda_im2col_1d(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> col,
+                         int K, int S, int P, int D, int L_out);
+void run_cuda_col2im_1d(std::shared_ptr<Tensor> grad_col, std::shared_ptr<Tensor> grad_x,
+                         int B, int C, int L_in, int K, int S, int P, int D, int L_out);
+void run_cuda_im2col_1d_typed(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> col,
+                               int K, int S, int P, int D, int L_out);
+#endif
+
 struct Node {
     std::function<std::vector<std::shared_ptr<Tensor>>(std::shared_ptr<Tensor>)> backward_fn;
     std::vector<std::shared_ptr<Tensor>> inputs;

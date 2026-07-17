@@ -1789,3 +1789,232 @@ std::shared_ptr<Tensor> run_cuda_sign_typed(std::shared_ptr<Tensor> a) {
         default: throw std::runtime_error("sign(): unsupported dtype '" + dtype_name(a->dtype) + "'");
     }
 }
+
+// ---- Fused HuberLoss: forward (elementwise + block-reduction in one pass)
+// and backward (single elementwise launch), collapsing what was previously
+// ~11 separate kernel launches (sub/abs/sub/relu/sub/mul/mul/sub/mul/add/sum)
+// into 2 total launches for the forward+reduce, plus 1 for backward.
+
+__global__ void huber_forward_reduce_kernel(const float* __restrict__ pred, const float* __restrict__ target,
+                                             float* __restrict__ partial_sums, float delta, int n) {
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x * 2 + threadIdx.x;
+
+    float sum = 0.0f;
+    if (idx < n) {
+        float diff = fabsf(pred[idx] - target[idx]);
+        sum += (diff <= delta) ? 0.5f * diff * diff : delta * (diff - 0.5f * delta);
+    }
+    if (idx + blockDim.x < n) {
+        float diff = fabsf(pred[idx + blockDim.x] - target[idx + blockDim.x]);
+        sum += (diff <= delta) ? 0.5f * diff * diff : delta * (diff - 0.5f * delta);
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) partial_sums[blockIdx.x] = sdata[0];
+}
+
+__global__ void huber_backward_kernel(const float* __restrict__ pred, const float* __restrict__ target,
+                                       float* __restrict__ grad_pred, float grad_scale, float delta, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float diff = pred[i] - target[i];
+        float abs_diff = fabsf(diff);
+        float grad;
+        if (abs_diff <= delta) {
+            grad = diff;  // d/d(pred) of 0.5*diff^2 = diff
+        } else {
+            grad = delta * (diff > 0.0f ? 1.0f : -1.0f);  // d/d(pred) of delta*(|diff|-0.5*delta) = delta*sign(diff)
+        }
+        grad_pred[i] = grad * grad_scale;
+    }
+}
+
+__global__ void plain_sum_reduce_kernel(const float* __restrict__ in, float* __restrict__ partial_sums, int n) {
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x * 2 + threadIdx.x;
+    float sum = 0.0f;
+    if (idx < n) sum += in[idx];
+    if (idx + blockDim.x < n) sum += in[idx + blockDim.x];
+    sdata[tid] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) partial_sums[blockIdx.x] = sdata[0];
+}
+
+static float reduce_partials_to_scalar(float* d_partial, int blocks) {
+    while (blocks > 1) {
+        int n2 = blocks;
+        int threads2 = 256;
+        int blocks2 = (n2 + threads2 * 2 - 1) / (threads2 * 2);
+        float* d_partial2;
+        cudaMalloc(&d_partial2, blocks2 * sizeof(float));
+        plain_sum_reduce_kernel<<<blocks2, threads2, threads2 * sizeof(float)>>>(d_partial, d_partial2, n2);
+        cudaFree(d_partial);
+        d_partial = d_partial2;
+        blocks = blocks2;
+    }
+    float result;
+    cudaMemcpy(&result, d_partial, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_partial);
+    return result;
+}
+
+std::pair<float, std::shared_ptr<Tensor>> run_cuda_huber_loss_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta) {
+    if (!pred->is_contiguous() || !target->is_contiguous())
+        throw std::invalid_argument("HuberLoss requires contiguous tensors. Call .contiguous() first.");
+    int n = pred->size;
+    if (n == 0) throw std::runtime_error("HuberLoss: cannot reduce an empty tensor");
+
+    int threads = 256;
+    int blocks = (n + threads * 2 - 1) / (threads * 2);
+    float* d_partial;
+    cudaMalloc(&d_partial, blocks * sizeof(float));
+
+    huber_forward_reduce_kernel<<<blocks, threads, threads * sizeof(float)>>>(
+        pred->fptr(), target->fptr(), d_partial, delta, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) { cudaFree(d_partial); throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err)); }
+
+    float total = reduce_partials_to_scalar(d_partial, blocks);
+    return {total, nullptr};  // second element reserved; pred/target themselves are what backward needs
+}
+
+std::shared_ptr<Tensor> run_cuda_huber_loss_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target,
+                                                      float delta, float grad_scale) {
+    auto result = std::make_shared<Tensor>(pred->shape, std::string("cuda"));
+    int n = pred->size;
+    if (n == 0) return result;
+    huber_backward_kernel<<<elem_blocks(n), 256>>>(pred->fptr(), target->fptr(), result->fptr(), grad_scale, delta, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+__global__ void cross_entropy_forward_kernel(const float* __restrict__ logits,
+                                              const float* __restrict__ onehot,
+                                              float* __restrict__ per_row_loss,
+                                              int C) {
+    extern __shared__ float sdata[];
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    const float* row_logits = logits + (long long)row * C;
+    const float* row_onehot = onehot + (long long)row * C;
+
+    // Pass 1: row max (for numerical stability)
+    float local_max = -INFINITY;
+    for (int c = tid; c < C; c += blockDim.x) local_max = fmaxf(local_max, row_logits[c]);
+    sdata[tid] = local_max;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        __syncthreads();
+    }
+    float row_max = sdata[0];
+    __syncthreads();
+
+    // Pass 2: sum(exp(x - max))
+    float local_sum = 0.0f;
+    for (int c = tid; c < C; c += blockDim.x) local_sum += expf(row_logits[c] - row_max);
+    sdata[tid] = local_sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    float log_sum_exp = logf(sdata[0]);
+    __syncthreads();
+
+    // Pass 3: -(onehot * log_softmax).sum() for this row = -(onehot * (x - max - logsumexp)).sum()
+    float local_loss = 0.0f;
+    for (int c = tid; c < C; c += blockDim.x) {
+        float log_prob = row_logits[c] - row_max - log_sum_exp;
+        local_loss += -row_onehot[c] * log_prob;
+    }
+    sdata[tid] = local_loss;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) per_row_loss[row] = sdata[0];
+}
+
+__global__ void cross_entropy_backward_kernel(const float* __restrict__ logits,
+                                               const float* __restrict__ onehot,
+                                               float* __restrict__ grad_logits,
+                                               float grad_scale, int C) {
+    extern __shared__ float sdata[];
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    const float* row_logits = logits + (long long)row * C;
+    const float* row_onehot = onehot + (long long)row * C;
+    float* row_grad = grad_logits + (long long)row * C;
+
+    float local_max = -INFINITY;
+    for (int c = tid; c < C; c += blockDim.x) local_max = fmaxf(local_max, row_logits[c]);
+    sdata[tid] = local_max;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        __syncthreads();
+    }
+    float row_max = sdata[0];
+    __syncthreads();
+
+    float local_sum = 0.0f;
+    for (int c = tid; c < C; c += blockDim.x) local_sum += expf(row_logits[c] - row_max);
+    sdata[tid] = local_sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    float sum_exp = sdata[0];
+    __syncthreads();
+
+    // grad = (softmax(logits) - onehot) * grad_scale, the closed-form
+    // gradient of cross-entropy w.r.t. logits — no log_softmax needed here.
+    for (int c = tid; c < C; c += blockDim.x) {
+        float softmax_c = expf(row_logits[c] - row_max) / sum_exp;
+        row_grad[c] = (softmax_c - row_onehot[c]) * grad_scale;
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_cross_entropy_per_row(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot) {
+    if (!logits->is_contiguous() || !onehot->is_contiguous())
+        throw std::invalid_argument("cross_entropy requires contiguous tensors. Call .contiguous() first.");
+    int N = logits->shape[0];
+    int C = logits->shape[1];
+
+    auto per_row = std::make_shared<Tensor>(std::vector<int>{N}, std::string("cuda"));
+    int threads = 256;
+    cross_entropy_forward_kernel<<<N, threads, threads * sizeof(float)>>>(
+        logits->fptr(), onehot->fptr(), per_row->fptr(), C);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return per_row;
+}
+
+std::shared_ptr<Tensor> run_cuda_cross_entropy_backward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot, float grad_scale) {
+    auto grad = std::make_shared<Tensor>(logits->shape, std::string("cuda"));
+    int N = logits->shape[0];
+    int C = logits->shape[1];
+    int threads = 256;
+    cross_entropy_backward_kernel<<<N, threads, threads * sizeof(float)>>>(
+        logits->fptr(), onehot->fptr(), grad->fptr(), grad_scale, C);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return grad;
+}

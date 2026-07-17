@@ -1341,3 +1341,87 @@ std::shared_ptr<Tensor> run_cpu_sign_typed(std::shared_ptr<Tensor> a) {
         default: throw std::runtime_error("sign(): unsupported dtype '" + dtype_name(a->dtype) + "'");
     }
 }
+
+float run_cpu_huber_loss_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta) {
+    if (!pred->is_contiguous() || !target->is_contiguous())
+        throw std::invalid_argument("HuberLoss requires contiguous tensors. Call .contiguous() first.");
+    int n = pred->size;
+    if (n == 0) throw std::runtime_error("HuberLoss: cannot reduce an empty tensor");
+    const float* pp = pred->fptr();
+    const float* tp = target->fptr();
+    double total = 0.0;
+    #pragma omp parallel for reduction(+:total)
+    for (int i = 0; i < n; ++i) {
+        float diff = std::fabs(pp[i] - tp[i]);
+        total += (diff <= delta) ? 0.5f * diff * diff : delta * (diff - 0.5f * delta);
+    }
+    return (float)total;
+}
+
+std::shared_ptr<Tensor> run_cpu_huber_loss_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target,
+                                                     float delta, float grad_scale) {
+    auto result = std::make_shared<Tensor>(pred->shape, std::string("cpu"));
+    int n = pred->size;
+    const float* pp = pred->fptr();
+    const float* tp = target->fptr();
+    float* rp = result->fptr();
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
+        float diff = pp[i] - tp[i];
+        float abs_diff = std::fabs(diff);
+        float grad = (abs_diff <= delta) ? diff : delta * (diff > 0.0f ? 1.0f : -1.0f);
+        rp[i] = grad * grad_scale;
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_cross_entropy_per_row(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot) {
+    if (!logits->is_contiguous() || !onehot->is_contiguous())
+        throw std::invalid_argument("cross_entropy requires contiguous tensors. Call .contiguous() first.");
+    int N = logits->shape[0];
+    int C = logits->shape[1];
+    auto per_row = std::make_shared<Tensor>(std::vector<int>{N}, std::string("cpu"));
+    const float* lp = logits->fptr();
+    const float* op = onehot->fptr();
+    float* rp = per_row->fptr();
+
+    #pragma omp parallel for
+    for (int r = 0; r < N; ++r) {
+        const float* row_l = lp + (long long)r * C;
+        const float* row_o = op + (long long)r * C;
+        float row_max = -INFINITY;
+        for (int c = 0; c < C; ++c) row_max = std::max(row_max, row_l[c]);
+        float sum_exp = 0.0f;
+        for (int c = 0; c < C; ++c) sum_exp += std::exp(row_l[c] - row_max);
+        float log_sum_exp = std::log(sum_exp);
+        float loss = 0.0f;
+        for (int c = 0; c < C; ++c) loss += -row_o[c] * (row_l[c] - row_max - log_sum_exp);
+        rp[r] = loss;
+    }
+    return per_row;
+}
+
+std::shared_ptr<Tensor> run_cpu_cross_entropy_backward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot, float grad_scale) {
+    int N = logits->shape[0];
+    int C = logits->shape[1];
+    auto grad = std::make_shared<Tensor>(logits->shape, std::string("cpu"));
+    const float* lp = logits->fptr();
+    const float* op = onehot->fptr();
+    float* gp = grad->fptr();
+
+    #pragma omp parallel for
+    for (int r = 0; r < N; ++r) {
+        const float* row_l = lp + (long long)r * C;
+        const float* row_o = op + (long long)r * C;
+        float* row_g = gp + (long long)r * C;
+        float row_max = -INFINITY;
+        for (int c = 0; c < C; ++c) row_max = std::max(row_max, row_l[c]);
+        float sum_exp = 0.0f;
+        for (int c = 0; c < C; ++c) sum_exp += std::exp(row_l[c] - row_max);
+        for (int c = 0; c < C; ++c) {
+            float softmax_c = std::exp(row_l[c] - row_max) / sum_exp;
+            row_g[c] = (softmax_c - row_o[c]) * grad_scale;
+        }
+    }
+    return grad;
+}

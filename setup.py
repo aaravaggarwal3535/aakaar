@@ -189,6 +189,7 @@ class CUDABuildExtension(build_ext):
             # Windows/macOS).
             for ext in self.extensions:
                 ext.libraries.append("dl")
+                ext.libraries.append("gomp")
 
         # =================================================================
         # CUDA wiring (Linux/Windows only — CUDA_AVAILABLE is always False
@@ -203,6 +204,18 @@ class CUDABuildExtension(build_ext):
 
             nvcc_flags = ["-O3", "-std=c++17"] + get_gencode_flags()
             nvcc_flags.append("-Xcompiler=/MD" if is_windows else "-Xcompiler=-fPIC")
+
+            if CUDNN_PATHS is not None:
+                cudnn_include, cudnn_lib = CUDNN_PATHS
+                for ext in self.extensions:
+                    if "src/conv_cudnn.cu" not in ext.sources:
+                        ext.sources.append("src/conv_cudnn.cu")
+                    if cudnn_include not in ext.include_dirs:
+                        ext.include_dirs.append(cudnn_include)
+                    if cudnn_lib not in ext.library_dirs:
+                        ext.library_dirs.append(cudnn_lib)
+                    ext.libraries.append("cudnn")
+                    ext.define_macros.append(("AAKAAR_HAS_CUDNN", "1"))
 
             # Point nvcc at GCC 13 explicitly — CUDA 12.4 does not support
             # GCC 14 (the manylinux_2_28 default). -allow-unsupported-compiler
@@ -233,7 +246,11 @@ class CUDABuildExtension(build_ext):
                     objects.append(obj_file)
                 ext.include_dirs.append(cuda_include)
                 ext.library_dirs.append(cuda_lib)
-                ext.libraries.extend(["curand", "cudart", "cublas"])
+                ext.libraries.extend(["curand", "cudart", "cublas", "cudnn"])
+                # cudnn.h ships alongside cuda headers on most installs (apt libcudnn8-dev,
+                # or bundled in nvidia pip wheels); if the build fails with "cudnn.h not
+                # found", it needs to be installed/pointed at explicitly — not something
+                # this script silently works around.
             else:
                 # No CUDA toolkit: skip .cu sources entirely, CPU-only build.
                 # This applies uniformly on Windows-without-CUDA, Linux-without-
@@ -247,17 +264,24 @@ class CUDABuildExtension(build_ext):
         super().build_extensions()
 
 
-host_compiler_flags = ["/std:c++17"] if sys.platform == "win32" else ["-std=c++17"]
+if sys.platform == "win32":
+    host_compiler_flags = ["/std:c++17", "/openmp"]
+elif sys.platform == "darwin":
+    host_compiler_flags = ["-std=c++17"]
+else:
+    host_compiler_flags = ["-std=c++17", "-fopenmp"]
 aakaar_ext = Extension(
     "aakaar._C",
     sources=[
         "src/bindings.cpp",
         "src/cpu_kernel.cpp",
+        "src/conv_kernel.cpp",
         "src/random_kernel.cu",
         "src/matmul_kernel.cu",
         "src/elementwise_kernel.cu",
         "src/reduction_kernel.cu",
         "src/strided_copy_kernel.cu",
+        "src/conv_kernel.cu",
     ],
     include_dirs=[
         pybind11.get_include(),
@@ -266,20 +290,6 @@ aakaar_ext = Extension(
     libraries=[],  # populated conditionally above
     language="c++",
     extra_compile_args=host_compiler_flags,
-)
-
-setup(
-    name="aakaar",
-    version="0.2.0",
-    author="Aarav Aggarwal",
-    description="A custom standalone ML library featuring CUDA-accelerated operations (CPU fallback supported).",
-    packages=["aakaar", "aakaar._openblas_bin"],
-    package_data={"aakaar": ["_openblas_bin/*.dll"]},
-    include_package_data=True,
-    ext_modules=[aakaar_ext],
-    cmdclass={"build_ext": CUDABuildExtension},
-    install_requires=["numpy"],
-    setup_requires=["pybind11"],
 )
 
 def log_softmax(x, dim=-1):
@@ -337,3 +347,69 @@ def binary_cross_entropy_with_logits(logits, target):
         "binary_cross_entropy_with_logits requires elementwise abs(), which "
         "doesn't exist in aakaar yet. Tracked gap, not implemented here."
     )
+
+def find_cudnn():
+    candidates = []
+    cudnn_root = os.environ.get("CUDNN_ROOT")
+    if cudnn_root:
+        candidates.append((os.path.join(cudnn_root, "include"), os.path.join(cudnn_root, "lib", "x64")))
+    cuda_home = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME")
+    if cuda_home:
+        candidates.append((os.path.join(cuda_home, "include"), os.path.join(cuda_home, "lib", "x64")))
+
+    # pip-installed nvidia-cudnn-cu12: ships headers+libs under site-packages/nvidia/cudnn
+    import site
+    for root in site.getsitepackages() + [site.getusersitepackages()]:
+        base = os.path.join(root, "nvidia", "cudnn")
+        inc = os.path.join(base, "include")
+        lib_win = os.path.join(base, "lib", "x64")
+        lib_linux = os.path.join(base, "lib")
+        if os.path.isfile(os.path.join(inc, "cudnn.h")):
+            candidates.append((inc, lib_win if sys.platform == "win32" else lib_linux))
+
+    nvidia_cudnn_root = r"C:\Program Files\NVIDIA\CUDNN"
+    if os.path.isdir(nvidia_cudnn_root):
+        version = get_nvcc_version()
+        cuda_ver_str = f"{version[0]}.{version[1]}" if version else None
+        for entry in sorted(os.listdir(nvidia_cudnn_root), reverse=True):
+            base = os.path.join(nvidia_cudnn_root, entry)
+            inc_base = os.path.join(base, "include")
+            if not os.path.isdir(inc_base):
+                continue
+            subdirs = ([cuda_ver_str] if cuda_ver_str else []) + \
+                      [d for d in os.listdir(inc_base) if d != cuda_ver_str]
+            for sub in subdirs:
+                if sub:
+                    candidates.append((os.path.join(inc_base, sub),
+                                        os.path.join(base, "lib", sub, "x64")))
+
+    candidates.append(("/usr/local/cuda/include", "/usr/local/cuda/lib64"))
+    candidates.append(("/usr/include", "/usr/lib/x86_64-linux-gnu"))
+
+    for inc, lib in candidates:
+        if os.path.isfile(os.path.join(inc, "cudnn.h")):
+            return (inc, lib)
+    return None
+
+CUDNN_PATHS = find_cudnn() if CUDA_AVAILABLE else None
+print(f"cuDNN detected: {CUDNN_PATHS is not None}" + ("" if CUDNN_PATHS is None else f" ({CUDNN_PATHS[0]})"))
+
+setup(
+    name="aakaar",
+    version="0.2.0",
+    author="Aarav Aggarwal",
+    description="A custom standalone ML library featuring CUDA-accelerated operations (CPU fallback supported).",
+    packages=["aakaar", "aakaar._openblas_bin"],
+    package_data={"aakaar": ["_openblas_bin/*.dll"]},
+    include_package_data=True,
+    ext_modules=[aakaar_ext],
+    cmdclass={"build_ext": CUDABuildExtension},
+    install_requires=[
+        "numpy",
+        'nvidia-cuda-runtime; platform_system=="Windows" or platform_system=="Linux"',
+        'nvidia-cublas; platform_system=="Windows" or platform_system=="Linux"',
+        'nvidia-curand; platform_system=="Windows" or platform_system=="Linux"',
+        'nvidia-cudnn-cu13; platform_system=="Windows" or platform_system=="Linux"',
+    ],
+    setup_requires=["pybind11"],
+)

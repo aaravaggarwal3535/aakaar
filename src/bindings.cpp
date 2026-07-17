@@ -12,6 +12,8 @@ namespace py = pybind11;
 static bool g_grad_enabled = true;
 void set_tf32_enabled(bool enabled);
 bool get_tf32_enabled();
+void set_cudnn_tf32_enabled(bool enabled);
+bool get_cudnn_tf32_enabled();
 // ---- Forward declarations: raw ops ----
 void fill_cpu_random(std::shared_ptr<Tensor> t, unsigned long long seed);
 void fill_cpu_randint(std::shared_ptr<Tensor> t, long long low, long long high, unsigned long long seed);
@@ -71,6 +73,10 @@ std::shared_ptr<Tensor> run_cpu_abs_typed(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_abs_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
 std::shared_ptr<Tensor> run_cpu_sign(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_sign_typed(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cpu_cross_entropy_per_row(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot);
+std::shared_ptr<Tensor> run_cpu_cross_entropy_backward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot, float grad_scale);
+float run_cpu_huber_loss_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta);
+std::shared_ptr<Tensor> run_cpu_huber_loss_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta, float grad_scale);
 
 #ifndef AAKAAR_NO_CUDA
 #include "allocator.h"
@@ -132,6 +138,18 @@ std::shared_ptr<Tensor> run_cuda_abs_typed(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_abs_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
 std::shared_ptr<Tensor> run_cuda_sign(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_sign_typed(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cudnn_conv1d_forward(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
+                                                   int stride, int padding, int dilation, int L_out);
+std::shared_ptr<Tensor> run_cudnn_conv1d_backward_data(std::shared_ptr<Tensor> grad_y, std::shared_ptr<Tensor> w,
+                                                         int B, int C_in, int L_in, int stride, int padding,
+                                                         int dilation, int L_out);
+std::shared_ptr<Tensor> run_cudnn_conv1d_backward_filter(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> grad_y,
+                                                           int C_out, int K, int stride, int padding,
+                                                           int dilation, int L_out);
+std::pair<float, std::shared_ptr<Tensor>> run_cuda_huber_loss_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta);
+std::shared_ptr<Tensor> run_cuda_huber_loss_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta, float grad_scale);
+std::shared_ptr<Tensor> run_cuda_cross_entropy_per_row(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot);
+std::shared_ptr<Tensor> run_cuda_cross_entropy_backward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot, float grad_scale);
 void empty_cache() { CachingAllocator::get_instance().empty_cache(); }
 #endif
 
@@ -148,6 +166,7 @@ static std::shared_ptr<Tensor> dispatch_matmul(std::shared_ptr<Tensor> a, std::s
 static std::shared_ptr<Tensor> dispatch_sum_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim);
 static std::shared_ptr<Tensor> dispatch_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size);
 static std::shared_ptr<Tensor> dispatch_contiguous(std::shared_ptr<Tensor> a);
+static std::shared_ptr<Tensor> dispatch_huber_loss(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta);
 
 // Add near your other includes/declarations
 int cuda_device_count() {
@@ -803,6 +822,100 @@ static std::shared_ptr<Tensor> dispatch_sum_all(std::shared_ptr<Tensor> a) {
     return result;
 }
 
+static std::shared_ptr<Tensor> dispatch_im2col_1d(std::shared_ptr<Tensor> x, int kernel_size, int stride,
+                                                    int padding, int dilation, int out_length) {
+    if (x->shape.size() != 3)
+        throw std::invalid_argument("im2col_1d: expected input of shape (batch, channels, length), got rank " +
+                                     std::to_string(x->shape.size()));
+    if (!x->is_contiguous()) x = dispatch_contiguous(x);
+
+    int B = x->shape[0], C = x->shape[1], L_in = x->shape[2];
+    std::vector<int> col_shape = {B, C * kernel_size, out_length};
+
+    if (x->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && x->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(x->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+        auto result = std::make_shared<Tensor>(col_shape, x->device, x->dtype);
+#ifndef AAKAAR_NO_CUDA
+        if (x->device == "cuda") {
+            run_cuda_im2col_1d_typed(x, result, kernel_size, stride, padding, dilation, out_length);
+            return result;
+        }
+#endif
+        run_cpu_im2col_1d_typed(x, result, kernel_size, stride, padding, dilation, out_length);
+        return result;
+    }
+
+    auto result = std::make_shared<Tensor>(col_shape, x->device);
+#ifndef AAKAAR_NO_CUDA
+    if (x->device == "cuda") run_cuda_im2col_1d(x, result, kernel_size, stride, padding, dilation, out_length);
+    else
+#endif
+    run_cpu_im2col_1d(x, result, kernel_size, stride, padding, dilation, out_length);
+
+    if (g_grad_enabled && x->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {x};
+        node->op_name = "im2col_1d";
+        int B_c = B, C_c = C, L_in_c = L_in, K_c = kernel_size, S_c = stride, P_c = padding, D_c = dilation, Lo_c = out_length;
+        auto dev = x->device;
+        node->backward_fn = [B_c, C_c, L_in_c, K_c, S_c, P_c, D_c, Lo_c, dev](std::shared_ptr<Tensor> grad_out) {
+            auto grad_x = std::make_shared<Tensor>(std::vector<int>{B_c, C_c, L_in_c}, dev);
+#ifndef AAKAAR_NO_CUDA
+            if (dev == "cuda") run_cuda_col2im_1d(grad_out, grad_x, B_c, C_c, L_in_c, K_c, S_c, P_c, D_c, Lo_c);
+            else
+#endif
+            run_cpu_col2im_1d(grad_out, grad_x, B_c, C_c, L_in_c, K_c, S_c, P_c, D_c, Lo_c);
+            return std::vector<std::shared_ptr<Tensor>>{grad_x};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_conv1d_cudnn(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
+                                                       int stride, int padding, int dilation) {
+#ifdef AAKAAR_NO_CUDA
+    throw std::runtime_error("conv1d_cudnn: this build of aakaar has no CUDA/cuDNN support.");
+#else
+    if (x->device != "cuda" || w->device != "cuda")
+        throw std::runtime_error("conv1d_cudnn: both input and weight must be on device='cuda'.");
+    if (x->dtype != DType::FLOAT32 || w->dtype != DType::FLOAT32)
+        throw std::runtime_error(
+            "conv1d_cudnn: only float32 is supported. cuDNN's double-precision conv support is "
+            "unreliable/slow across versions and it has no integer conv path at all — aakaar "
+            "intentionally does not route those dtypes here. Use conv1d_im2col (matmul-based) instead.");
+    if (!x->is_contiguous()) x = dispatch_contiguous(x);
+    if (!w->is_contiguous()) w = dispatch_contiguous(w);
+
+    int B = x->shape[0], C_in = x->shape[1], L_in = x->shape[2];
+    int C_out = w->shape[0], K = w->shape[2];
+    int L_out = (L_in + 2 * padding - dilation * (K - 1) - 1) / stride + 1;
+    if (L_out <= 0)
+        throw std::invalid_argument("conv1d_cudnn: computed output length <= 0.");
+
+    auto y = run_cudnn_conv1d_forward(x, w, stride, padding, dilation, L_out);
+
+    if (g_grad_enabled && (x->requires_grad || w->requires_grad)) {
+        y->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {x, w};
+        node->op_name = "conv1d_cudnn";
+        int B_c = B, Cin_c = C_in, Lin_c = L_in, Cout_c = C_out, K_c = K, S_c = stride, P_c = padding, D_c = dilation, Lo_c = L_out;
+        node->backward_fn = [x, w, B_c, Cin_c, Lin_c, Cout_c, K_c, S_c, P_c, D_c, Lo_c]
+                             (std::shared_ptr<Tensor> grad_out) {
+            auto grad_x = run_cudnn_conv1d_backward_data(grad_out, w, B_c, Cin_c, Lin_c, S_c, P_c, D_c, Lo_c);
+            auto grad_w = run_cudnn_conv1d_backward_filter(x, grad_out, Cout_c, K_c, S_c, P_c, D_c, Lo_c);
+            return std::vector<std::shared_ptr<Tensor>>{grad_x, grad_w};
+        };
+        y->grad_fn = node;
+    }
+    return y;
+#endif
+}
+
 
 // Sums `grad` down to `target_shape` following numpy/torch broadcasting-gradient
 // rules: any leading dims present in `grad` but absent from `target_shape` are
@@ -1094,6 +1207,131 @@ static std::shared_ptr<Tensor> dispatch_sign(std::shared_ptr<Tensor> a) {
     return result;
 }
 
+static std::shared_ptr<Tensor> dispatch_huber_loss(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta) {
+    if (pred->dtype != DType::FLOAT32 || target->dtype != DType::FLOAT32)
+        throw std::runtime_error("huber_loss(): only float32 is currently supported by the fused kernel.");
+    if (!pred->is_contiguous()) pred = dispatch_contiguous(pred);
+    if (!target->is_contiguous()) target = dispatch_contiguous(target);
+
+    float total;
+#ifndef AAKAAR_NO_CUDA
+    if (pred->device == "cuda") {
+        auto r = run_cuda_huber_loss_forward(pred, target, delta);
+        total = r.first;
+    } else
+#endif
+    total = run_cpu_huber_loss_forward(pred, target, delta);
+
+    int n = pred->size;
+    float mean_loss = total / n;
+
+    auto result = std::make_shared<Tensor>(std::vector<int>{1}, pred->device);
+#ifndef AAKAAR_NO_CUDA
+    if (pred->device == "cuda") cudaMemcpy(result->fptr(), &mean_loss, sizeof(float), cudaMemcpyHostToDevice);
+    else
+#endif
+    result->fptr()[0] = mean_loss;
+
+    if (g_grad_enabled && (pred->requires_grad || target->requires_grad)) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {pred, target};
+        node->op_name = "huber_loss";
+        node->backward_fn = [pred, target, delta, n](std::shared_ptr<Tensor> grad_out) {
+            float grad_out_scalar;
+#ifndef AAKAAR_NO_CUDA
+            if (grad_out->device == "cuda") cudaMemcpy(&grad_out_scalar, grad_out->fptr(), sizeof(float), cudaMemcpyDeviceToHost);
+            else
+#endif
+            grad_out_scalar = grad_out->fptr()[0];
+
+            float grad_scale = grad_out_scalar / n;
+            std::shared_ptr<Tensor> grad_pred, grad_target;
+#ifndef AAKAAR_NO_CUDA
+            if (pred->device == "cuda") {
+                grad_pred = run_cuda_huber_loss_backward(pred, target, delta, grad_scale);
+                grad_target = run_cuda_huber_loss_backward(pred, target, delta, -grad_scale);
+            } else
+#endif
+            {
+                grad_pred = run_cpu_huber_loss_backward(pred, target, delta, grad_scale);
+                grad_target = run_cpu_huber_loss_backward(pred, target, delta, -grad_scale);
+            }
+            return std::vector<std::shared_ptr<Tensor>>{grad_pred, grad_target};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_cross_entropy_fused(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot) {
+    if (logits->dtype != DType::FLOAT32 || onehot->dtype != DType::FLOAT32)
+        throw std::runtime_error("cross_entropy(): only float32 is currently supported by the fused kernel.");
+    if (logits->shape.size() != 2)
+        throw std::runtime_error("cross_entropy(): fused kernel currently requires 2D (batch, classes) input.");
+    if (!logits->is_contiguous()) logits = dispatch_contiguous(logits);
+    if (!onehot->is_contiguous()) onehot = dispatch_contiguous(onehot);
+
+    std::shared_ptr<Tensor> per_row;
+#ifndef AAKAAR_NO_CUDA
+    if (logits->device == "cuda") per_row = run_cuda_cross_entropy_per_row(logits, onehot);
+    else
+#endif
+    per_row = run_cpu_cross_entropy_per_row(logits, onehot);
+
+    int N = logits->shape[0];
+    float total = 0.0f;
+    auto per_row_np = per_row->fptr();
+#ifndef AAKAAR_NO_CUDA
+    if (logits->device == "cuda") {
+        std::vector<float> host_buf(N);
+        cudaMemcpy(host_buf.data(), per_row->fptr(), N * sizeof(float), cudaMemcpyDeviceToHost);
+        for (float v : host_buf) total += v;
+    } else
+#endif
+    { for (int i = 0; i < N; ++i) total += per_row_np[i]; }
+
+    float mean_loss = total / N;
+    auto result = std::make_shared<Tensor>(std::vector<int>{1}, logits->device);
+#ifndef AAKAAR_NO_CUDA
+    if (logits->device == "cuda") cudaMemcpy(result->fptr(), &mean_loss, sizeof(float), cudaMemcpyHostToDevice);
+    else
+#endif
+    result->fptr()[0] = mean_loss;
+
+    if (g_grad_enabled && (logits->requires_grad || onehot->requires_grad)) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {logits, onehot};
+        node->op_name = "cross_entropy_fused";
+        node->backward_fn = [logits, onehot, N](std::shared_ptr<Tensor> grad_out) {
+            float grad_out_scalar;
+#ifndef AAKAAR_NO_CUDA
+            if (grad_out->device == "cuda") cudaMemcpy(&grad_out_scalar, grad_out->fptr(), sizeof(float), cudaMemcpyDeviceToHost);
+            else
+#endif
+            grad_out_scalar = grad_out->fptr()[0];
+            float grad_scale = grad_out_scalar / N;
+
+            std::shared_ptr<Tensor> grad_logits;
+#ifndef AAKAAR_NO_CUDA
+            if (logits->device == "cuda") grad_logits = run_cuda_cross_entropy_backward(logits, onehot, grad_scale);
+            else
+#endif
+            grad_logits = run_cpu_cross_entropy_backward(logits, onehot, grad_scale);
+
+            // No meaningful gradient w.r.t. the one-hot target in this
+            // formulation (it's a fixed label, not a learned input) —
+            // return a zero tensor of matching shape for it.
+            auto zero_target_grad = std::make_shared<Tensor>(onehot->shape, onehot->device);
+            zero_target_grad->fill_zero();
+            return std::vector<std::shared_ptr<Tensor>>{grad_logits, zero_target_grad};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
 static std::shared_ptr<Tensor> tensor_from_numpy_typed(py::array arr, std::string device, bool requires_grad) {
     py::buffer_info buf = arr.request();
     std::vector<int> shape;
@@ -1234,6 +1472,9 @@ PYBIND11_MODULE(_C, m) {
         .def("__len__", [](Tensor &t) { return t.shape.empty() ? 0 : t.shape[0]; })
         .def("exp", [](std::shared_ptr<Tensor> self) { return dispatch_exp(self); })
         .def("log", [](std::shared_ptr<Tensor> self) { return dispatch_log(self); })
+        .def("huber_loss", [](std::shared_ptr<Tensor> self, std::shared_ptr<Tensor> target, float delta) {
+            return dispatch_huber_loss(self, target, delta);
+        }, py::arg("target"), py::arg("delta") = 1.0f)
         .def("view", [](std::shared_ptr<Tensor> self, std::vector<int> new_shape) {
             auto result = self->view(new_shape);
             if (g_grad_enabled && self->requires_grad) {
@@ -1434,6 +1675,15 @@ PYBIND11_MODULE(_C, m) {
     m.def("_set_tf32_enabled", &set_tf32_enabled);
     m.def("_get_tf32_enabled", &get_tf32_enabled);
     m.def("_synchronize", &cuda_synchronize);
+    m.def("im2col_1d", &dispatch_im2col_1d,
+          py::arg("x"), py::arg("kernel_size"), py::arg("stride"),
+          py::arg("padding"), py::arg("dilation"), py::arg("out_length"));
+    m.def("conv1d_cudnn", &dispatch_conv1d_cudnn,
+          py::arg("x"), py::arg("w"), py::arg("stride"), py::arg("padding"), py::arg("dilation"));
+    m.def("_huber_loss_fused", &dispatch_huber_loss, py::arg("pred"), py::arg("target"), py::arg("delta") = 1.0f);
+    m.def("_cross_entropy_fused", &dispatch_cross_entropy_fused, py::arg("logits"), py::arg("onehot"));
+    m.def("_set_cudnn_tf32_enabled", &set_cudnn_tf32_enabled);
+    m.def("_get_cudnn_tf32_enabled", &get_cudnn_tf32_enabled);
     m.def("_allocator_stats", []() -> py::tuple {
     auto [hits, misses] = CachingAllocator::get_instance().get_stats();
     return py::make_tuple(hits, misses);
@@ -1442,4 +1692,7 @@ PYBIND11_MODULE(_C, m) {
 #else
     m.attr("HAS_CUDA") = false;
 #endif
+    m.def("im2col_1d", &dispatch_im2col_1d,
+          py::arg("x"), py::arg("kernel_size"), py::arg("stride"),
+          py::arg("padding"), py::arg("dilation"), py::arg("out_length"));
 }

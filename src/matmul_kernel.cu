@@ -18,6 +18,13 @@ private:
 };
 
 static bool g_use_tf32 = false;
+// Separate from matmul's TF32 flag, matching torch's own separation of
+// torch.backends.cuda.matmul.allow_tf32 vs torch.backends.cudnn.allow_tf32
+// — these have different history/defaults in torch and shouldn't be conflated.
+static bool g_use_cudnn_tf32 = true;  // torch defaults cudnn.allow_tf32 to True on Ampere+
+
+void set_cudnn_tf32_enabled(bool enabled) { g_use_cudnn_tf32 = enabled; }
+bool get_cudnn_tf32_enabled() { return g_use_cudnn_tf32; }
 
 void set_tf32_enabled(bool enabled) {
     g_use_tf32 = enabled;

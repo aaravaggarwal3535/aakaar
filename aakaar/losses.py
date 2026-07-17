@@ -14,6 +14,7 @@ training scripts this session).
 
 import numpy as np
 from . import softmax, log_softmax
+import aakaar
 
 
 def _reduce(loss_per_element, reduction):
@@ -57,14 +58,15 @@ class NLLLoss:
 
 
 class CrossEntropyLoss:
-    """Numerically stable: computes log_softmax internally rather than
-    softmax-then-log. Takes ONE-HOT targets (see module docstring)."""
     def __init__(self, reduction='mean'):
         self.reduction = reduction
-        self._nll = NLLLoss(reduction=reduction)
 
     def __call__(self, logits, target_onehot):
-        return self._nll(log_softmax(logits, dim=-1), target_onehot)
+        if (self.reduction == 'mean' and logits.dtype == 'float32' and
+                target_onehot.dtype == 'float32' and len(logits.shape) == 2):
+            return aakaar._C._cross_entropy_fused(logits, target_onehot)
+        # Fallback: original unfused path for other reductions/shapes/dtypes
+        return NLLLoss(reduction=self.reduction)(log_softmax(logits, dim=-1), target_onehot)
 
 
 class PoissonNLLLoss:
@@ -151,21 +153,18 @@ class BCEWithLogitsLoss:
     
 
 class HuberLoss:
-    """Quadratic for |error| <= delta, linear beyond — the 'smooth region'
-    boundary matches torch's Huber (not SmoothL1's 1/delta scaling
-    difference, see SmoothL1Loss below for that distinction)."""
     def __init__(self, delta=1.0, reduction='mean'):
         self.delta = delta
         self.reduction = reduction
 
     def __call__(self, pred, target):
+        if self.reduction == 'mean' and pred.dtype == 'float32' and target.dtype == 'float32':
+            return aakaar._C._huber_loss_fused(pred, target, self.delta)
+        # Fallback: original multi-op path for sum/none reduction or non-float32
         diff = (pred - target).abs()
-        # quadratic branch: 0.5*diff^2 ; linear branch: delta*(diff - 0.5*delta)
-        # combined via relu-based selection: quadratic capped, linear excess added.
-        capped = diff - (diff - self.delta).relu()  # min(diff, delta) via relu identity
+        capped = diff - (diff - self.delta).relu()
         quadratic = 0.5 * capped * capped
-        linear_excess = self.delta * (diff - capped)
-        per_element = quadratic + linear_excess
+        per_element = quadratic + (diff - capped)
         return _reduce(per_element, self.reduction)
 
 
