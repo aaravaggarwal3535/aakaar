@@ -27,13 +27,17 @@ jobs:
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
             dnf clean all &&
             dnf -y install cuda-toolkit-12-8 gcc-toolset-13 openblas-devel
+
           CIBW_BEFORE_BUILD: >
-            pip install nvidia-cudnn-cu12 nvidia-cublas-cu12
+            pip install pybind11 nvidia-cudnn-cu12 nvidia-cublas-cu12
+
           CIBW_ENVIRONMENT_LINUX: >
             PATH=/usr/local/cuda-12.8/bin:$PATH
             LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH
             CUDA_HOME=/usr/local/cuda-12.8
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --exclude libcudnn* --exclude libcublas* --exclude libcurand* -w {dest_dir} {wheel}"
+
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >
+            bash -c "export LD_LIBRARY_PATH=$(python -c 'import nvidia.cudnn, nvidia.cublas, os; print(os.path.dirname(nvidia.cudnn.__file__)+\"/lib:\"+os.path.dirname(nvidia.cublas.__file__)+\"/lib\")'):$LD_LIBRARY_PATH:/usr/local/cuda-12.8/lib64 && auditwheel repair --exclude 'libcudnn*' --exclude 'libcublas*' --exclude 'libcurand*' -w {dest_dir} {wheel}"
 
       - name: Upload wheels as artifacts
         uses: actions/upload-artifact@v4

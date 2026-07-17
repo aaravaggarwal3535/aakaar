@@ -246,7 +246,7 @@ class CUDABuildExtension(build_ext):
                     objects.append(obj_file)
                 ext.include_dirs.append(cuda_include)
                 ext.library_dirs.append(cuda_lib)
-                ext.libraries.extend(["curand", "cudart", "cublas", "cudnn"])
+                ext.libraries.extend(["curand", "cudart", "cublas"])
                 # cudnn.h ships alongside cuda headers on most installs (apt libcudnn8-dev,
                 # or bundled in nvidia pip wheels); if the build fails with "cudnn.h not
                 # found", it needs to be installed/pointed at explicitly — not something
