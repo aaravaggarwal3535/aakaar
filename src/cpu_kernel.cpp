@@ -181,70 +181,166 @@ static std::shared_ptr<Tensor> run_cpu_broadcast_elementwise(std::shared_ptr<Ten
 }
 
 std::shared_ptr<Tensor> run_cpu_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x+y; });
+    if (a->shape != b->shape)
+        return run_cpu_broadcast_elementwise(a, b, [](float x, float y) { return x + y; });
+
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+
     if (a->is_contiguous() && b->is_contiguous()) {
-        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->fptr()[i] + b->fptr()[i];
+        const float* ap = a->fptr();
+        const float* bp = b->fptr();
+        float* rp = result->fptr();
+        int n = a->size;
+
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ap[i] + bp[i];
     } else {
-        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) + b->get_scalar_flat(i);
+        for (int i = 0; i < a->size; ++i)
+            result->fptr()[i] = a->get_scalar_flat(i) + b->get_scalar_flat(i);
     }
+
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x-y; });
+    if (a->shape != b->shape)
+        return run_cpu_broadcast_elementwise(a, b, [](float x, float y) { return x - y; });
+
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+
     if (a->is_contiguous() && b->is_contiguous()) {
-        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->fptr()[i] - b->fptr()[i];
+        const float* ap = a->fptr();
+        const float* bp = b->fptr();
+        float* rp = result->fptr();
+        int n = a->size;
+
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ap[i] - bp[i];
     } else {
-        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) - b->get_scalar_flat(i);
+        for (int i = 0; i < a->size; ++i)
+            result->fptr()[i] = a->get_scalar_flat(i) - b->get_scalar_flat(i);
     }
+
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x*y; });
+    if (a->shape != b->shape)
+        return run_cpu_broadcast_elementwise(a, b, [](float x, float y) { return x * y; });
+
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+
     if (a->is_contiguous() && b->is_contiguous()) {
-        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->fptr()[i] * b->fptr()[i];
+        const float* ap = a->fptr();
+        const float* bp = b->fptr();
+        float* rp = result->fptr();
+        int n = a->size;
+
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ap[i] * bp[i];
     } else {
-        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) * b->get_scalar_flat(i);
+        for (int i = 0; i < a->size; ++i)
+            result->fptr()[i] = a->get_scalar_flat(i) * b->get_scalar_flat(i);
     }
+
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
-    if (a->shape != b->shape) return run_cpu_broadcast_elementwise(a, b, [](float x, float y){ return x/y; });
+    if (a->shape != b->shape)
+        return run_cpu_broadcast_elementwise(a, b, [](float x, float y) { return x / y; });
+
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+
     if (a->is_contiguous() && b->is_contiguous()) {
-        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->fptr()[i] / b->fptr()[i];
+        const float* ap = a->fptr();
+        const float* bp = b->fptr();
+        float* rp = result->fptr();
+        int n = a->size;
+
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ap[i] / bp[i];
     } else {
-        for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) / b->get_scalar_flat(i);
+        for (int i = 0; i < a->size; ++i)
+            result->fptr()[i] = a->get_scalar_flat(i) / b->get_scalar_flat(i);
     }
+
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_add_scalar(std::shared_ptr<Tensor> a, float s) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) + s;
+    int n = a->size;
+    float* rp = result->fptr();
+
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ap[i] + s;
+    } else {
+        for (int i = 0; i < n; ++i)
+            rp[i] = a->get_scalar_flat(i) + s;
+    }
+
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_sub_scalar(std::shared_ptr<Tensor> a, float s) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) - s;
+    int n = a->size;
+    float* rp = result->fptr();
+
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ap[i] - s;
+    } else {
+        for (int i = 0; i < n; ++i)
+            rp[i] = a->get_scalar_flat(i) - s;
+    }
+
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_mul_scalar(std::shared_ptr<Tensor> a, float s) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) * s;
+    int n = a->size;
+    float* rp = result->fptr();
+
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ap[i] * s;
+    } else {
+        for (int i = 0; i < n; ++i)
+            rp[i] = a->get_scalar_flat(i) * s;
+    }
+
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_div_scalar(std::shared_ptr<Tensor> a, float s) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->fptr()[i] = a->get_scalar_flat(i) / s;
+    int n = a->size;
+    float* rp = result->fptr();
+
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ap[i] / s;
+    } else {
+        for (int i = 0; i < n; ++i)
+            rp[i] = a->get_scalar_flat(i) / s;
+    }
+
     return result;
 }
 
@@ -319,86 +415,209 @@ std::shared_ptr<Tensor> run_cpu_broadcast_axis(std::shared_ptr<Tensor> a, int di
 
 std::shared_ptr<Tensor> run_cpu_relu(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) {
-        float v = a->get_scalar_flat(i);
-        result->fptr()[i] = v > 0.0f ? v : 0.0f;
+    int n = a->size;
+    float* rp = result->fptr();
+
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ap[i] > 0.0f ? ap[i] : 0.0f;
+    } else {
+        for (int i = 0; i < n; ++i) {
+            float v = a->get_scalar_flat(i);
+            rp[i] = v > 0.0f ? v : 0.0f;
+        }
     }
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
     auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
-    for (int i = 0; i < input->size; ++i) {
-        result->fptr()[i] = input->get_scalar_flat(i) > 0.0f ? grad_out->fptr()[i] : 0.0f;
+    int n = input->size;
+    float* rp = result->fptr();
+    const float* gp = grad_out->fptr();
+
+    if (input->is_contiguous()) {
+        const float* ip = input->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ip[i] > 0.0f ? gp[i] : 0.0f;
+    } else {
+        for (int i = 0; i < n; ++i)
+            rp[i] = input->get_scalar_flat(i) > 0.0f ? gp[i] : 0.0f;
     }
     return result;
 }
 
 std::shared_ptr<Tensor> run_cpu_sigmoid(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) {
-        result->fptr()[i] = 1.0f / (1.0f + std::exp(-a->get_scalar_flat(i)));
+    int n = a->size;
+    float* rp = result->fptr();
+
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = 1.0f / (1.0f + std::exp(-ap[i]));
+    } else {
+        for (int i = 0; i < n; ++i)
+            rp[i] = 1.0f / (1.0f + std::exp(-a->get_scalar_flat(i)));
     }
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_sigmoid_backward(std::shared_ptr<Tensor> grad_out, const float* sig_out_ptr, int size, std::vector<int> shape) {
     auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
+    float* rp = result->fptr();
+    const float* gp = grad_out->fptr();
+
+    #pragma omp parallel for
     for (int i = 0; i < size; ++i) {
         float s = sig_out_ptr[i];
-        result->fptr()[i] = grad_out->fptr()[i] * s * (1.0f - s);
+        rp[i] = gp[i] * s * (1.0f - s);
     }
+
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_tanh(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) {
-        result->fptr()[i] = std::tanh(a->get_scalar_flat(i));
+    int n = a->size;
+    float* rp = result->fptr();
+
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = std::tanh(ap[i]);
+    } else {
+        for (int i = 0; i < n; ++i)
+            rp[i] = std::tanh(a->get_scalar_flat(i));
     }
+
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_tanh_backward(std::shared_ptr<Tensor> grad_out, const float* tanh_out_ptr, int size, std::vector<int> shape) {
     auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
+    float* rp = result->fptr();
+    const float* gp = grad_out->fptr();
+
+    #pragma omp parallel for
     for (int i = 0; i < size; ++i) {
         float t = tanh_out_ptr[i];
-        result->fptr()[i] = grad_out->fptr()[i] * (1.0f - t * t);
+        rp[i] = gp[i] * (1.0f - t * t);
     }
+
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_leaky_relu(std::shared_ptr<Tensor> a, float slope) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) {
-        float v = a->get_scalar_flat(i);
-        result->fptr()[i] = v > 0.0f ? v : v * slope;
+    int n = a->size;
+    float* rp = result->fptr();
+
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ap[i] > 0.0f ? ap[i] : ap[i] * slope;
+    } else {
+        for (int i = 0; i < n; ++i) {
+            float v = a->get_scalar_flat(i);
+            rp[i] = v > 0.0f ? v : v * slope;
+        }
     }
+
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_leaky_relu_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input, float slope) {
     auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
-    for (int i = 0; i < input->size; ++i) {
-        float x = input->get_scalar_flat(i);
-        result->fptr()[i] = x > 0.0f ? grad_out->fptr()[i] : grad_out->fptr()[i] * slope;
+    int n = input->size;
+    float* rp = result->fptr();
+    const float* gp = grad_out->fptr();
+
+    if (input->is_contiguous()) {
+        const float* ip = input->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = ip[i] > 0.0f ? gp[i] : gp[i] * slope;
+    } else {
+        for (int i = 0; i < n; ++i) {
+            float x = input->get_scalar_flat(i);
+            rp[i] = x > 0.0f ? gp[i] : gp[i] * slope;
+        }
     }
+
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_exp(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->fptr()[i] = std::exp(a->get_scalar_flat(i));
+    int n = a->size;
+    float* rp = result->fptr();
+
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = std::exp(ap[i]);
+    } else {
+        for (int i = 0; i < n; ++i)
+            rp[i] = std::exp(a->get_scalar_flat(i));
+    }
+
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_exp_backward(std::shared_ptr<Tensor> grad_out, const float* exp_out_ptr, int size, std::vector<int> shape) {
     auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
-    for (int i = 0; i < size; ++i) {
-        result->fptr()[i] = grad_out->fptr()[i] * exp_out_ptr[i];
-    }
+    float* rp = result->fptr();
+    const float* gp = grad_out->fptr();
+
+    #pragma omp parallel for
+    for (int i = 0; i < size; ++i)
+        rp[i] = gp[i] * exp_out_ptr[i];
+
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_log(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->fptr()[i] = std::log(a->get_scalar_flat(i));
+    int n = a->size;
+    float* rp = result->fptr();
+
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = std::log(ap[i]);
+    } else {
+        for (int i = 0; i < n; ++i)
+            rp[i] = std::log(a->get_scalar_flat(i));
+    }
+
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_log_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
     auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
-    for (int i = 0; i < input->size; ++i) result->fptr()[i] = grad_out->fptr()[i] / input->get_scalar_flat(i);
+    int n = input->size;
+    float* rp = result->fptr();
+    const float* gp = grad_out->fptr();
+
+    if (input->is_contiguous()) {
+        const float* ip = input->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i)
+            rp[i] = gp[i] / ip[i];
+    } else {
+        for (int i = 0; i < n; ++i)
+            rp[i] = gp[i] / input->get_scalar_flat(i);
+    }
+
     return result;
 }
 std::pair<std::shared_ptr<Tensor>, std::vector<int>> run_cpu_max_axis(std::shared_ptr<Tensor> a, int dim, bool keepdim) {
@@ -966,15 +1185,24 @@ std::shared_ptr<Tensor> run_cpu_matmul_int_typed(std::shared_ptr<Tensor> a, std:
 // ---- sqrt (float32 native + float64 typed) ----
 std::shared_ptr<Tensor> run_cpu_sqrt(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->fptr()[i] = std::sqrt(a->get_scalar_flat(i));
+    int n = a->size;
+    float* rp = result->fptr();
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i) rp[i] = std::sqrt(ap[i]);
+    } else {
+        for (int i = 0; i < n; ++i) rp[i] = std::sqrt(a->get_scalar_flat(i));
+    }
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_sqrt_backward(std::shared_ptr<Tensor> grad_out, const float* sqrt_out_ptr, int size, std::vector<int> shape) {
     auto result = std::make_shared<Tensor>(shape, std::string("cpu"));
-    for (int i = 0; i < size; ++i) {
-        float y = sqrt_out_ptr[i];
-        result->fptr()[i] = grad_out->fptr()[i] * 0.5f / y;
-    }
+    float* rp = result->fptr();
+    const float* gp = grad_out->fptr();  // grad_out is always freshly-produced/contiguous here
+    #pragma omp parallel for
+    for (int i = 0; i < size; ++i) rp[i] = gp[i] * 0.5f / sqrt_out_ptr[i];
     return result;
 }
 
@@ -989,15 +1217,37 @@ std::shared_ptr<Tensor> run_cpu_sqrt_f64(std::shared_ptr<Tensor> a) {
 // ---- abs (float32 native + typed float64/int32/int64) ----
 std::shared_ptr<Tensor> run_cpu_abs(std::shared_ptr<Tensor> a) {
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
-    for (int i = 0; i < a->size; ++i) result->fptr()[i] = std::fabs(a->get_scalar_flat(i));
+    int n = a->size;
+    float* rp = result->fptr();
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i) rp[i] = std::fabs(ap[i]);
+    } else {
+        for (int i = 0; i < n; ++i) rp[i] = std::fabs(a->get_scalar_flat(i));
+    }
     return result;
 }
+
 std::shared_ptr<Tensor> run_cpu_abs_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input) {
     auto result = std::make_shared<Tensor>(input->shape, std::string("cpu"));
-    for (int i = 0; i < input->size; ++i) {
-        float x = input->get_scalar_flat(i);
-        float sign = (x > 0.0f) ? 1.0f : (x < 0.0f) ? -1.0f : 0.0f;  // torch convention: grad at 0 is 0
-        result->fptr()[i] = grad_out->fptr()[i] * sign;
+    int n = input->size;
+    float* rp = result->fptr();
+    if (input->is_contiguous() && grad_out->is_contiguous()) {
+        const float* ip = input->fptr();
+        const float* gp = grad_out->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i) {
+            float x = ip[i];
+            float sign = (x > 0.0f) ? 1.0f : (x < 0.0f) ? -1.0f : 0.0f;
+            rp[i] = gp[i] * sign;
+        }
+    } else {
+        for (int i = 0; i < n; ++i) {
+            float x = input->get_scalar_flat(i);
+            float sign = (x > 0.0f) ? 1.0f : (x < 0.0f) ? -1.0f : 0.0f;
+            rp[i] = grad_out->get_scalar_flat(i) * sign;
+        }
     }
     return result;
 }
@@ -1007,7 +1257,9 @@ static std::shared_ptr<Tensor> run_cpu_abs_typed_impl(std::shared_ptr<Tensor> a)
     auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"), a->dtype);
     const T* ap = static_cast<const T*>(a->data_ptr);
     T* rp = static_cast<T*>(result->data_ptr);
-    for (int i = 0; i < a->size; ++i) {
+    int n = a->size;
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
         T v = ap[i];
         rp[i] = v < T(0) ? -v : v;
     }
@@ -1041,5 +1293,51 @@ std::shared_ptr<Tensor> run_cpu_abs_backward_typed(std::shared_ptr<Tensor> grad_
         case DType::INT32:   return run_cpu_abs_backward_typed_impl<int32_t>(grad_out, input);
         case DType::INT64:   return run_cpu_abs_backward_typed_impl<int64_t>(grad_out, input);
         default: throw std::runtime_error("abs() backward: unsupported dtype '" + dtype_name(input->dtype) + "'");
+    }
+}
+
+// ---- sign: float32 native + typed float64/int32/int64 ----
+// Backward is always zero (sign(x)'s derivative is 0 almost everywhere,
+// undefined at x=0 — torch's own convention is to just return zero grad).
+
+std::shared_ptr<Tensor> run_cpu_sign(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"));
+    int n = a->size;
+    float* rp = result->fptr();
+    if (a->is_contiguous()) {
+        const float* ap = a->fptr();
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i) {
+            float v = ap[i];
+            rp[i] = v > 0.0f ? 1.0f : (v < 0.0f ? -1.0f : 0.0f);
+        }
+    } else {
+        for (int i = 0; i < n; ++i) {
+            float v = a->get_scalar_flat(i);
+            rp[i] = v > 0.0f ? 1.0f : (v < 0.0f ? -1.0f : 0.0f);
+        }
+    }
+    return result;
+}
+
+template <typename T>
+static std::shared_ptr<Tensor> run_cpu_sign_typed_impl(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cpu"), a->dtype);
+    const T* ap = static_cast<const T*>(a->data_ptr);
+    T* rp = static_cast<T*>(result->data_ptr);
+    int n = a->size;
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
+        T v = ap[i];
+        rp[i] = v > T(0) ? T(1) : (v < T(0) ? T(-1) : T(0));
+    }
+    return result;
+}
+std::shared_ptr<Tensor> run_cpu_sign_typed(std::shared_ptr<Tensor> a) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cpu_sign_typed_impl<double>(a);
+        case DType::INT32:   return run_cpu_sign_typed_impl<int32_t>(a);
+        case DType::INT64:   return run_cpu_sign_typed_impl<int64_t>(a);
+        default: throw std::runtime_error("sign(): unsupported dtype '" + dtype_name(a->dtype) + "'");
     }
 }

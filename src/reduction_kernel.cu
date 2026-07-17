@@ -59,17 +59,56 @@ std::shared_ptr<Tensor> run_cuda_sum_axis(std::shared_ptr<Tensor> a, int dim, bo
     return result;
 }
 
+__global__ void sum_all_reduce_kernel(const float* __restrict__ in, float* __restrict__ partial_sums, int n) {
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x * 2 + threadIdx.x;
+    float sum = 0.0f;
+    if (idx < n) sum += in[idx];
+    if (idx + blockDim.x < n) sum += in[idx + blockDim.x];
+    sdata[tid] = sum;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) partial_sums[blockIdx.x] = sdata[0];
+}
+
 std::shared_ptr<Tensor> run_cuda_sum_all(std::shared_ptr<Tensor> a) {
     if (!a->is_contiguous())
         throw std::invalid_argument("sum() requires a contiguous tensor. Call .contiguous() first.");
     auto result = std::make_shared<Tensor>(std::vector<int>{1}, std::string("cuda"));
-    // Simple approach: copy to host, reduce, copy back. Fine for now; optimize with a
-    // proper parallel reduction kernel later if this becomes a hot path.
-    std::vector<float> buf(a->size);
-    cudaMemcpy(buf.data(), a->fptr(), a->size * sizeof(float), cudaMemcpyDeviceToHost);
-    float acc = 0.0f;
-    for (float v : buf) acc += v;
-    cudaMemcpy(result->fptr(), &acc, sizeof(float), cudaMemcpyHostToDevice);
+    int n = a->size;
+    if (n == 0) { cudaMemset(result->fptr(), 0, sizeof(float)); return result; }
+
+    int threads = 256;
+    int blocks = (n + threads * 2 - 1) / (threads * 2);
+    float* d_partial;
+    cudaMalloc(&d_partial, blocks * sizeof(float));
+
+    sum_all_reduce_kernel<<<blocks, threads, threads * sizeof(float)>>>(a->fptr(), d_partial, n);
+
+    // Reduce the (small) partials array with a second pass, or with a
+    // final single-block call if it's already small enough.
+    while (blocks > 1) {
+        int n2 = blocks;
+        int threads2 = 256;
+        int blocks2 = (n2 + threads2 * 2 - 1) / (threads2 * 2);
+        float* d_partial2;
+        cudaMalloc(&d_partial2, blocks2 * sizeof(float));
+        sum_all_reduce_kernel<<<blocks2, threads2, threads2 * sizeof(float)>>>(d_partial, d_partial2, n2);
+        cudaFree(d_partial);
+        d_partial = d_partial2;
+        blocks = blocks2;
+    }
+
+    cudaMemcpy(result->fptr(), d_partial, sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaFree(d_partial);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
     return result;
 }
 

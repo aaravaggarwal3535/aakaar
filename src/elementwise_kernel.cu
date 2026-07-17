@@ -1709,3 +1709,83 @@ std::shared_ptr<Tensor> run_cuda_abs_backward_typed(std::shared_ptr<Tensor> grad
         default: throw std::runtime_error("abs() backward: unsupported dtype '" + dtype_name(input->dtype) + "'");
     }
 }
+
+// ---- sign: float32 native (vectorized) + typed float64/int32/int64 ----
+
+__global__ void sign_scalar_kernel(const float* __restrict__ in, float* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float v = __ldg(&in[i]);
+        out[i] = v > 0.0f ? 1.0f : (v < 0.0f ? -1.0f : 0.0f);
+    }
+}
+
+__global__ void sign_vec4_kernel_f32(const float4* __restrict__ in, float4* __restrict__ out, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n4; i += stride) {
+        float4 v = __ldg(&in[i]);
+        float4 r;
+        r.x = v.x > 0.0f ? 1.0f : (v.x < 0.0f ? -1.0f : 0.0f);
+        r.y = v.y > 0.0f ? 1.0f : (v.y < 0.0f ? -1.0f : 0.0f);
+        r.z = v.z > 0.0f ? 1.0f : (v.z < 0.0f ? -1.0f : 0.0f);
+        r.w = v.w > 0.0f ? 1.0f : (v.w < 0.0f ? -1.0f : 0.0f);
+        out[i] = r;
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_sign(std::shared_ptr<Tensor> a) {
+    if (!a->is_contiguous()) throw std::invalid_argument("sign requires a contiguous tensor. Call .contiguous() first.");
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"));
+    int n = a->size;
+    if (n == 0) return result;
+
+    const float* in_ptr = a->fptr();
+    float* out_ptr = result->fptr();
+    bool can_vec = (n >= 4) && is_aligned16(in_ptr) && is_aligned16(out_ptr);
+
+    if (can_vec) {
+        int n4 = n / 4;
+        int tail = n - n4 * 4;
+        sign_vec4_kernel_f32<<<elem_blocks(n4), 256>>>(
+            reinterpret_cast<const float4*>(in_ptr), reinterpret_cast<float4*>(out_ptr), n4);
+        if (tail > 0) {
+            sign_scalar_kernel<<<elem_blocks(tail), 256>>>(in_ptr + n4*4, out_ptr + n4*4, tail);
+        }
+    } else {
+        sign_scalar_kernel<<<elem_blocks(n), 256>>>(in_ptr, out_ptr, n);
+    }
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+template <typename T>
+__global__ void sign_scalar_kernel_typed(const T* __restrict__ in, T* __restrict__ out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        T v = __ldg(&in[i]);
+        out[i] = v > T(0) ? T(1) : (v < T(0) ? T(-1) : T(0));
+    }
+}
+template <typename T>
+static std::shared_ptr<Tensor> run_cuda_sign_typed_impl(std::shared_ptr<Tensor> a) {
+    auto result = std::make_shared<Tensor>(a->shape, std::string("cuda"), a->dtype);
+    int n = a->size;
+    if (n == 0) return result;
+    sign_scalar_kernel_typed<T><<<elem_blocks(n), 256>>>(
+        static_cast<const T*>(a->data_ptr), static_cast<T*>(result->data_ptr), n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+std::shared_ptr<Tensor> run_cuda_sign_typed(std::shared_ptr<Tensor> a) {
+    switch (a->dtype) {
+        case DType::FLOAT64: return run_cuda_sign_typed_impl<double>(a);
+        case DType::INT32:   return run_cuda_sign_typed_impl<int32_t>(a);
+        case DType::INT64:   return run_cuda_sign_typed_impl<int64_t>(a);
+        default: throw std::runtime_error("sign(): unsupported dtype '" + dtype_name(a->dtype) + "'");
+    }
+}

@@ -69,6 +69,8 @@ std::shared_ptr<Tensor> run_cpu_abs(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_abs_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
 std::shared_ptr<Tensor> run_cpu_abs_typed(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cpu_abs_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
+std::shared_ptr<Tensor> run_cpu_sign(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cpu_sign_typed(std::shared_ptr<Tensor> a);
 
 #ifndef AAKAAR_NO_CUDA
 #include "allocator.h"
@@ -128,6 +130,8 @@ std::shared_ptr<Tensor> run_cuda_abs(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_abs_backward(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
 std::shared_ptr<Tensor> run_cuda_abs_typed(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_abs_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
+std::shared_ptr<Tensor> run_cuda_sign(std::shared_ptr<Tensor> a);
+std::shared_ptr<Tensor> run_cuda_sign_typed(std::shared_ptr<Tensor> a);
 void empty_cache() { CachingAllocator::get_instance().empty_cache(); }
 #endif
 
@@ -1055,6 +1059,41 @@ static std::shared_ptr<Tensor> dispatch_matmul(std::shared_ptr<Tensor> a, std::s
     return result;
 }
 
+static std::shared_ptr<Tensor> dispatch_sign(std::shared_ptr<Tensor> a) {
+    if (a->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && a->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+        if (!a->is_contiguous()) a = dispatch_contiguous(a);
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") return run_cuda_sign_typed(a);
+#endif
+        return run_cpu_sign_typed(a);
+    }
+    if (!a->is_contiguous()) a = dispatch_contiguous(a);
+    std::shared_ptr<Tensor> result;
+#ifndef AAKAAR_NO_CUDA
+    if (a->device == "cuda") result = run_cuda_sign(a);
+    else
+#endif
+    result = run_cpu_sign(a);
+
+    if (g_grad_enabled && a->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {a};
+        node->op_name = "sign";
+        node->backward_fn = [](std::shared_ptr<Tensor> grad_out) {
+            // sign's derivative is zero almost everywhere — matches torch's
+            // convention of returning zero gradient, not an error.
+            auto zero_grad = dispatch_mul_scalar(grad_out, 0.0f);
+            return std::vector<std::shared_ptr<Tensor>>{zero_grad};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
 static std::shared_ptr<Tensor> tensor_from_numpy_typed(py::array arr, std::string device, bool requires_grad) {
     py::buffer_info buf = arr.request();
     std::vector<int> shape;
@@ -1370,6 +1409,7 @@ PYBIND11_MODULE(_C, m) {
         })
         .def("__matmul__", [](std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) { return dispatch_matmul(a, b); })
         .def("sqrt", [](std::shared_ptr<Tensor> self) { return dispatch_sqrt(self); })
+        .def("sign", [](std::shared_ptr<Tensor> self) { return dispatch_sign(self); })
         .def("abs", [](std::shared_ptr<Tensor> self) { return dispatch_abs(self); });
 
     m.def("_set_grad_enabled", [](bool enabled) { g_grad_enabled = enabled; });

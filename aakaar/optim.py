@@ -383,18 +383,6 @@ class ASGD:
 
 
 class Rprop:
-    """Resilient backpropagation: ignores gradient magnitude entirely, only
-    uses its SIGN. Step size for each parameter grows/shrinks based on
-    whether consecutive gradient signs agree. Needs sign(), built here
-    inline from relu-based comparisons since no dedicated sign() exists —
-    correct, not an approximation: sign(x) = relu(x)/(|x|+eps) - relu(-x)/(|x|+eps)
-    simplifies more directly via direct comparison in numpy on .grad's data,
-    done via a small numpy round-trip since this is a per-element control-flow
-    operation (step size branching) not easily vectorized purely in tensor ops
-    without a where()/select() primitive, which doesn't exist yet either.
-    Flagged: this implementation uses a numpy round-trip internally as a
-    pragmatic, correct (not approximate) solution to the missing where()/sign()
-    primitives — values and math are exact, just not a pure-tensor-op path."""
     def __init__(self, parameters, lr=0.01, etas=(0.5, 1.2), step_sizes=(1e-6, 50)):
         self.parameters = list(parameters)
         self.lr = lr
@@ -403,27 +391,40 @@ class Rprop:
         self._prev_grad = [None] * len(self.parameters)
         self._step_size = [None] * len(self.parameters)
 
+    @staticmethod
+    def _clip(t, lo, hi):
+        # min(max(t, lo), hi), built from relu identities (no elementwise
+        # clamp/min/max-with-scalar primitive exists yet):
+        #   max(t, lo) = lo + relu(t - lo)
+        #   min(x, hi) = hi - relu(hi - x)
+        raised = lo + (t - lo).relu()
+        return hi - (hi - raised).relu()
+
     def step(self):
         with no_grad():
             for i, p in enumerate(self.parameters):
                 if p.grad is None:
                     continue
-                grad_np = p.grad.to_numpy()
-                if self._prev_grad[i] is None:
-                    step_np = np.full_like(grad_np, self.lr)
-                else:
-                    prev_np = self._prev_grad[i]
-                    sign_agree = np.sign(grad_np * prev_np)
-                    step_np = self._step_size[i].copy()
-                    step_np[sign_agree > 0] *= self.eta_plus
-                    step_np[sign_agree < 0] *= self.eta_minus
-                    step_np = np.clip(step_np, self.step_min, self.step_max)
-                    grad_np = np.where(sign_agree < 0, 0.0, grad_np)
+                grad = p.grad
 
-                self._step_size[i] = step_np
-                self._prev_grad[i] = grad_np.copy()
-                update_np = np.sign(grad_np) * step_np
-                p.copy_(p - aakaar.from_numpy(update_np.astype(grad_np.dtype), device=p.device))
+                if self._prev_grad[i] is None:
+                    step_size = grad * 0.0 + self.lr
+                else:
+                    sign_agree = (grad * self._prev_grad[i]).sign()  # in {-1, 0, 1}
+                    pos_mask = sign_agree.relu()          # 1 where sign_agree == 1
+                    neg_mask = (-sign_agree).relu()       # 1 where sign_agree == -1
+                    same_mask = 1 - pos_mask - neg_mask   # 1 where sign_agree == 0
+
+                    step_size = self._step_size[i] * (pos_mask * self.eta_plus +
+                                                       neg_mask * self.eta_minus +
+                                                       same_mask * 1.0)
+                    step_size = self._clip(step_size, self.step_min, self.step_max)
+                    grad = grad * (1 - neg_mask)  # zero grad where sign flipped (torch's convention)
+
+                self._step_size[i] = step_size
+                self._prev_grad[i] = grad
+                update = grad.sign() * step_size
+                p.copy_(p - update)
 
     def zero_grad(self):
         for p in self.parameters:
