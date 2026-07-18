@@ -34,7 +34,11 @@ nav = [
           { "is_available" = "concepts/hardware-and-cuda/is_available.md" },
           { "device_count" = "concepts/hardware-and-cuda/device_count.md" },
           { "Performance & Tuning" = "concepts/hardware-and-cuda/performance.md" }
-      ]}
+      ]},
+      { "Tensors" = [
+          { "Overview" = "concepts/tensors/overview.md" },
+          { "Data Types (Dtypes)" = "concepts/tensors/dtypes.md" }
+      ]},
   ]},
   { "API Reference" = [
       { "aakaar.functional" = [
@@ -45,8 +49,52 @@ nav = [
       { "aakaar.nn" = [
           { "Linear" = "api/nn/Linear.md" }
       ]},
+      { "aakaar.transforms" = [
+        { "Overview" = "api/transforms/overview.md" },
+        { "Compose" = "api/transforms/compose.md" },
+        { "ToTensor" = "api/transforms/to_tensor.md" },
+        { "Normalize" = "api/transforms/normalize.md" },
+        { "Resize" = "api/transforms/resize.md" },
+        { "RandomCrop" = "api/transforms/random_crop.md" },
+        { "RandomResizedCrop" = "api/transforms/random_resized_crop.md" },
+        { "RandomHorizontalFlip" = "api/transforms/random_horizontal_flip.md" },
+        { "RandomVerticalFlip" = "api/transforms/random_vertical_flip.md" },
+        { "RandomRotation" = "api/transforms/random_rotation.md" },
+        { "RandomAffine" = "api/transforms/random_affine.md" },
+        { "ColorJitter" = "api/transforms/color_jitter.md" },
+        { "RandomErasing" = "api/transforms/random_erasing.md" },
+        { "GaussianBlur" = "api/transforms/gaussian_blur.md" }
+       ]},
+       { "aakaar.losses" = [
+        { "Overview" = "api/losses/overview.md" },
+        { "L1Loss" = "api/losses/l1_loss.md" },
+        { "MSELoss" = "api/losses/mse_loss.md" },
+        { "NLLLoss" = "api/losses/nll_loss.md" },
+        { "CrossEntropyLoss" = "api/losses/cross_entropy_loss.md" },
+        { "PoissonNLLLoss" = "api/losses/poisson_nll_loss.md" },
+        { "GaussianNLLLoss" = "api/losses/gaussian_nll_loss.md" },
+        { "KLDivLoss" = "api/losses/kldiv_loss.md" },
+        { "BCELoss" = "api/losses/bce_loss.md" },
+        { "BCEWithLogitsLoss" = "api/losses/bce_with_logits_loss.md" },
+        { "HuberLoss" = "api/losses/huber_loss.md" },
+        { "SmoothL1Loss" = "api/losses/smooth_l1_loss.md" },
+        { "MarginRankingLoss" = "api/losses/margin_ranking_loss.md" },
+        { "HingeEmbeddingLoss" = "api/losses/hinge_embedding_loss.md" },
+        { "SoftMarginLoss" = "api/losses/soft_margin_loss.md" },
+        { "MultiLabelSoftMarginLoss" = "api/losses/multilabel_soft_margin_loss.md" },
+        { "MultiMarginLoss" = "api/losses/multi_margin_loss.md" },
+        { "CosineEmbeddingLoss" = "api/losses/cosine_embedding_loss.md" },
+        { "TripletMarginLoss" = "api/losses/triplet_margin_loss.md" }
+    ]},
       { "aakaar.optim" = [
-          { "SGD" = "api/optim/SGD.md" }
+          { "SGD" = "api/optim/sgd.md" },
+          { "Adam" = "api/optim/adam.md" },
+          { "AdamW" = "api/optim/adamW.md" },
+          { "AdamX" = "api/optim/adamX.md" },
+          { "NAdam" = "api/optim/nadam.md" },
+          { "RAdam" = "api/optim/radam.md" },
+          { "ASGD" = "api/optim/asgd.md" },
+          { "Rprop" = "api/optim/rprop.md" },
       ]}
   ]},
   { "Limitations" = "limitations.md" }

@@ -1425,3 +1425,210 @@ std::shared_ptr<Tensor> run_cpu_cross_entropy_backward(std::shared_ptr<Tensor> l
     }
     return grad;
 }
+
+std::pair<float, int> run_cpu_bce_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target) {
+    if (!pred->is_contiguous() || !target->is_contiguous())
+        throw std::invalid_argument("BCELoss requires contiguous tensors. Call .contiguous() first.");
+    int n = pred->size;
+    if (n == 0) throw std::runtime_error("BCELoss: cannot reduce an empty tensor");
+    const float* pp = pred->fptr();
+    const float* tp = target->fptr();
+    const float eps = 1e-7f;
+    double total = 0.0;
+    #pragma omp parallel for reduction(+:total)
+    for (int i = 0; i < n; ++i) {
+        float p = pp[i], t = tp[i];
+        total += -(t * std::log(p + eps) + (1.0f - t) * std::log(1.0f - p + eps));
+    }
+    return {(float)total, n};
+}
+
+std::shared_ptr<Tensor> run_cpu_bce_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float grad_scale) {
+    auto result = std::make_shared<Tensor>(pred->shape, std::string("cpu"));
+    int n = pred->size;
+    const float* pp = pred->fptr();
+    const float* tp = target->fptr();
+    float* rp = result->fptr();
+    const float eps = 1e-7f;
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
+        float p = pp[i], t = tp[i];
+        float d = -(t / (p + eps) - (1.0f - t) / (1.0f - p + eps));
+        rp[i] = d * grad_scale;
+    }
+    return result;
+}
+
+std::pair<float, int> run_cpu_smoothl1_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float beta) {
+    if (!pred->is_contiguous() || !target->is_contiguous())
+        throw std::invalid_argument("SmoothL1Loss requires contiguous tensors. Call .contiguous() first.");
+    int n = pred->size;
+    if (n == 0) throw std::runtime_error("SmoothL1Loss: cannot reduce an empty tensor");
+    const float* pp = pred->fptr();
+    const float* tp = target->fptr();
+    double total = 0.0;
+    #pragma omp parallel for reduction(+:total)
+    for (int i = 0; i < n; ++i) {
+        float d = std::fabs(pp[i] - tp[i]);
+        total += (d < beta) ? 0.5f * d * d / beta : d - 0.5f * beta;
+    }
+    return {(float)total, n};
+}
+
+std::shared_ptr<Tensor> run_cpu_smoothl1_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float beta, float grad_scale) {
+    auto result = std::make_shared<Tensor>(pred->shape, std::string("cpu"));
+    int n = pred->size;
+    const float* pp = pred->fptr();
+    const float* tp = target->fptr();
+    float* rp = result->fptr();
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
+        float diff = pp[i] - tp[i];
+        float ad = std::fabs(diff);
+        float g = (ad < beta) ? diff / beta : (diff > 0.0f ? 1.0f : -1.0f);
+        rp[i] = g * grad_scale;
+    }
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_multimargin_per_row(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot, float margin) {
+    if (!logits->is_contiguous() || !onehot->is_contiguous())
+        throw std::invalid_argument("MultiMarginLoss requires contiguous tensors. Call .contiguous() first.");
+    int N = logits->shape[0], C = logits->shape[1];
+    auto per_row = std::make_shared<Tensor>(std::vector<int>{N}, std::string("cpu"));
+    const float* lp = logits->fptr();
+    const float* op = onehot->fptr();
+    float* rp = per_row->fptr();
+
+    #pragma omp parallel for
+    for (int r = 0; r < N; ++r) {
+        const float* row_l = lp + (long long)r * C;
+        const float* row_o = op + (long long)r * C;
+        float correct_score = 0.0f;
+        for (int c = 0; c < C; ++c) correct_score += row_l[c] * row_o[c];
+        float loss = 0.0f;
+        for (int c = 0; c < C; ++c) {
+            if (row_o[c] > 0.5f) continue;
+            float m = margin - correct_score + row_l[c];
+            if (m > 0.0f) loss += m;
+        }
+        rp[r] = loss / C;
+    }
+    return per_row;
+}
+
+std::shared_ptr<Tensor> run_cpu_multimargin_backward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot, float margin, float grad_scale) {
+    int N = logits->shape[0], C = logits->shape[1];
+    auto grad = std::make_shared<Tensor>(logits->shape, std::string("cpu"));
+    const float* lp = logits->fptr();
+    const float* op = onehot->fptr();
+    float* gp = grad->fptr();
+
+    #pragma omp parallel for
+    for (int r = 0; r < N; ++r) {
+        const float* row_l = lp + (long long)r * C;
+        const float* row_o = op + (long long)r * C;
+        float* row_g = gp + (long long)r * C;
+        float correct_score = 0.0f;
+        for (int c = 0; c < C; ++c) correct_score += row_l[c] * row_o[c];
+        float active_count = 0.0f;
+        for (int c = 0; c < C; ++c) {
+            if (row_o[c] > 0.5f) continue;
+            float m = margin - correct_score + row_l[c];
+            if (m > 0.0f) active_count += 1.0f;
+        }
+        for (int c = 0; c < C; ++c) {
+            if (row_o[c] > 0.5f) {
+                row_g[c] = (-active_count / C) * grad_scale;
+            } else {
+                float m = margin - correct_score + row_l[c];
+                row_g[c] = ((m > 0.0f) ? (1.0f / C) : 0.0f) * grad_scale;
+            }
+        }
+    }
+    return grad;
+}
+
+std::pair<float, int> run_cpu_mse_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target) {
+    if (!pred->is_contiguous() || !target->is_contiguous())
+        throw std::invalid_argument("MSELoss requires contiguous tensors. Call .contiguous() first.");
+    int n = pred->size;
+    if (n == 0) throw std::runtime_error("MSELoss: cannot reduce an empty tensor");
+    const float* pp = pred->fptr();
+    const float* tp = target->fptr();
+    double total = 0.0;
+    #pragma omp parallel for reduction(+:total)
+    for (int i = 0; i < n; ++i) { float d = pp[i] - tp[i]; total += (double)(d * d); }
+    return {(float)total, n};
+}
+
+std::shared_ptr<Tensor> run_cpu_mse_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float grad_scale) {
+    auto result = std::make_shared<Tensor>(pred->shape, std::string("cpu"));
+    int n = pred->size;
+    const float* pp = pred->fptr();
+    const float* tp = target->fptr();
+    float* rp = result->fptr();
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) rp[i] = 2.0f * (pp[i] - tp[i]) * grad_scale;
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_nll_per_row(std::shared_ptr<Tensor> log_probs, std::shared_ptr<Tensor> onehot) {
+    if (!log_probs->is_contiguous() || !onehot->is_contiguous())
+        throw std::invalid_argument("NLLLoss requires contiguous tensors. Call .contiguous() first.");
+    int N = log_probs->shape[0], C = log_probs->shape[1];
+    auto per_row = std::make_shared<Tensor>(std::vector<int>{N}, std::string("cpu"));
+    const float* lp = log_probs->fptr();
+    const float* op = onehot->fptr();
+    float* rp = per_row->fptr();
+    #pragma omp parallel for
+    for (int r = 0; r < N; ++r) {
+        const float* row_lp = lp + (long long)r * C;
+        const float* row_oh = op + (long long)r * C;
+        float loss = 0.0f;
+        for (int c = 0; c < C; ++c) loss += -row_oh[c] * row_lp[c];
+        rp[r] = loss;
+    }
+    return per_row;
+}
+
+std::shared_ptr<Tensor> run_cpu_nll_backward(std::shared_ptr<Tensor> onehot, float grad_scale) {
+    auto result = std::make_shared<Tensor>(onehot->shape, std::string("cpu"));
+    int n = onehot->size;
+    const float* op = onehot->fptr();
+    float* rp = result->fptr();
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) rp[i] = -op[i] * grad_scale;
+    return result;
+}
+
+std::pair<float, int> run_cpu_bce_logits_forward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> target) {
+    if (!logits->is_contiguous() || !target->is_contiguous())
+        throw std::invalid_argument("BCEWithLogitsLoss requires contiguous tensors. Call .contiguous() first.");
+    int n = logits->size;
+    if (n == 0) throw std::runtime_error("BCEWithLogitsLoss: cannot reduce an empty tensor");
+    const float* lp = logits->fptr();
+    const float* tp = target->fptr();
+    double total = 0.0;
+    #pragma omp parallel for reduction(+:total)
+    for (int i = 0; i < n; ++i) {
+        float x = lp[i], t = tp[i];
+        float max_term = x > 0.0f ? x : 0.0f;
+        total += max_term - x * t + std::log1p(std::exp(-std::fabs(x)));
+    }
+    return {(float)total, n};
+}
+
+std::shared_ptr<Tensor> run_cpu_bce_logits_backward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> target, float grad_scale) {
+    auto result = std::make_shared<Tensor>(logits->shape, std::string("cpu"));
+    int n = logits->size;
+    const float* lp = logits->fptr();
+    const float* tp = target->fptr();
+    float* rp = result->fptr();
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
+        float sig = 1.0f / (1.0f + std::exp(-lp[i]));
+        rp[i] = (sig - tp[i]) * grad_scale;
+    }
+    return result;
+}

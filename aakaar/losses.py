@@ -42,17 +42,20 @@ class MSELoss:
         self.reduction = reduction
 
     def __call__(self, pred, target):
+        if self.reduction == 'mean' and pred.dtype == 'float32' and target.dtype == 'float32':
+            return aakaar._C._mse_fused(pred, target)
         diff = pred - target
         return _reduce(diff * diff, self.reduction)
 
 
 class NLLLoss:
-    """Negative log likelihood given log-probabilities (e.g. from
-    log_softmax) and ONE-HOT targets."""
     def __init__(self, reduction='mean'):
         self.reduction = reduction
 
     def __call__(self, log_probs, target_onehot):
+        if (self.reduction == 'mean' and log_probs.dtype == 'float32' and
+                target_onehot.dtype == 'float32' and len(log_probs.shape) == 2):
+            return aakaar._C._nll_fused(log_probs, target_onehot)
         per_sample = -(target_onehot * log_probs).sum(dim=-1)
         return _reduce(per_sample, self.reduction)
 
@@ -127,29 +130,6 @@ class KLDivLoss:
         if self.reduction == 'batchmean':
             return per_element.sum() / input_log_probs.shape[0]
         return _reduce(per_element, self.reduction)
-
-
-class BCELoss:
-    """Binary cross-entropy from probabilities (NOT logits — see
-    BCEWithLogitsLoss for the numerically stable logits version)."""
-    def __init__(self, reduction='mean'):
-        self.reduction = reduction
-
-    def __call__(self, pred_probs, target):
-        eps = 1e-7
-        per_element = -(target * (pred_probs + eps).log() +
-                        (1 - target) * (1 - pred_probs + eps).log())
-        return _reduce(per_element, self.reduction)
-
-
-class BCEWithLogitsLoss:
-    def __init__(self, reduction='mean'):
-        self.reduction = reduction
-
-    def __call__(self, logits, target):
-        max_term = logits.relu()
-        per_element = max_term - logits * target + (1 + (-logits.abs()).exp()).log()
-        return _reduce(per_element, self.reduction)
     
 
 class HuberLoss:
@@ -164,19 +144,6 @@ class HuberLoss:
         diff = (pred - target).abs()
         capped = diff - (diff - self.delta).relu()
         quadratic = 0.5 * capped * capped
-        per_element = quadratic + (diff - capped)
-        return _reduce(per_element, self.reduction)
-
-
-class SmoothL1Loss:
-    def __init__(self, beta=1.0, reduction='mean'):
-        self.beta = beta
-        self.reduction = reduction
-
-    def __call__(self, pred, target):
-        diff = (pred - target).abs()
-        capped = diff - (diff - self.beta).relu()  # min(diff, beta)
-        quadratic = 0.5 * capped * capped / self.beta
         per_element = quadratic + (diff - capped)
         return _reduce(per_element, self.reduction)
     
@@ -210,6 +177,18 @@ class HingeEmbeddingLoss:
         return _reduce(per_element, self.reduction)
 
 
+class BCEWithLogitsLoss:
+    def __init__(self, reduction='mean'):
+        self.reduction = reduction
+
+    def __call__(self, logits, target):
+        if self.reduction == 'mean' and logits.dtype == 'float32' and target.dtype == 'float32':
+            return aakaar._C._bce_logits_fused(logits, target)
+        max_term = logits.relu()
+        per_element = max_term - logits * target + (1 + (-logits.abs()).exp()).log()
+        return _reduce(per_element, self.reduction)
+
+
 class SoftMarginLoss:
     """loss = log(1 + exp(-y*x)), y in {1,-1}. Numerically stabilized using
     the same max(x,0)+log1p(exp(-|x|)) trick as BCEWithLogitsLoss."""
@@ -232,27 +211,6 @@ class MultiLabelSoftMarginLoss:
     def __call__(self, logits, target):
         per_class = self._bce(logits, target)
         per_sample = per_class.sum(dim=-1) / logits.shape[-1]
-        return _reduce(per_sample, self.reduction)
-
-
-class MultiMarginLoss:
-    """Multi-class hinge loss: mean_j!=y max(0, margin - x[y] + x[j])^p.
-    Takes a ONE-HOT target (see module docstring). p=1 (default) or p=2."""
-    def __init__(self, p=1, margin=1.0, reduction='mean'):
-        if p not in (1, 2):
-            raise ValueError("MultiMarginLoss only supports p=1 or p=2")
-        self.p = p
-        self.margin = margin
-        self.reduction = reduction
-
-    def __call__(self, logits, target_onehot):
-        correct_score = (logits * target_onehot).sum(dim=-1, keepdim=True)
-        margins = (self.margin - correct_score + logits).relu()
-        # zero out the j == y term (torch excludes the correct class itself)
-        margins = margins * (1 - target_onehot)
-        if self.p == 2:
-            margins = margins * margins
-        per_sample = margins.sum(dim=-1) / logits.shape[-1]
         return _reduce(per_sample, self.reduction)
 
 
@@ -295,3 +253,49 @@ class TripletMarginLoss:
         d_neg = (((anchor - negative) * (anchor - negative)).sum(dim=-1) + eps).sqrt()
         per_element = (d_pos - d_neg + self.margin).relu()
         return _reduce(per_element, self.reduction)
+    
+
+class BCELoss:
+    def __init__(self, reduction='mean'):
+        self.reduction = reduction
+
+    def __call__(self, pred_probs, target):
+        if self.reduction == 'mean' and pred_probs.dtype == 'float32' and target.dtype == 'float32':
+            return aakaar._C._bce_fused(pred_probs, target)
+        eps = 1e-7
+        per_element = -(target * (pred_probs + eps).log() + (1 - target) * (1 - pred_probs + eps).log())
+        return _reduce(per_element, self.reduction)
+
+
+class SmoothL1Loss:
+    def __init__(self, beta=1.0, reduction='mean'):
+        self.beta = beta
+        self.reduction = reduction
+
+    def __call__(self, pred, target):
+        if self.reduction == 'mean' and pred.dtype == 'float32' and target.dtype == 'float32':
+            return aakaar._C._smoothl1_fused(pred, target, self.beta)
+        diff = (pred - target).abs()
+        capped = diff - (diff - self.beta).relu()
+        quadratic = 0.5 * capped * capped / self.beta
+        return _reduce(quadratic + (diff - capped), self.reduction)
+
+
+class MultiMarginLoss:
+    def __init__(self, p=1, margin=1.0, reduction='mean'):
+        if p not in (1, 2):
+            raise ValueError("MultiMarginLoss only supports p=1 or p=2")
+        self.p = p
+        self.margin = margin
+        self.reduction = reduction
+
+    def __call__(self, logits, target_onehot):
+        if (self.p == 1 and self.reduction == 'mean' and
+                logits.dtype == 'float32' and target_onehot.dtype == 'float32'):
+            return aakaar._C._multimargin_fused(logits, target_onehot, self.margin)
+        # fallback: original unfused path (also handles p=2)
+        correct_score = (logits * target_onehot).sum(dim=-1, keepdim=True)
+        margins = (self.margin - correct_score + logits).relu() * (1 - target_onehot)
+        if self.p == 2:
+            margins = margins * margins
+        return _reduce(margins.sum(dim=-1) / logits.shape[-1], self.reduction)

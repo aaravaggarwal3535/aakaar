@@ -30,40 +30,8 @@ document$.subscribe(function() {
     
     kofiLink.appendChild(kofiImg);
 
-    // 3. Setup the Smart UPI Button 
-    const upiLink = document.createElement("a");
-    upiLink.href = "javascript:void(0)"; // This line prevents the desktop browser error!
-    upiLink.style.cursor = "pointer";
-    
-    const upiImg = document.createElement("img");
-    upiImg.src = "https://img.shields.io/badge/UPI_Support-4CAF50?style=for-the-badge&logo=google-pay&logoColor=white";
-    upiImg.alt = "Support via UPI";
-    upiImg.style.height = "36px"; 
-    upiImg.style.borderRadius = "4px"; 
-    
-    upiLink.appendChild(upiImg);
-
-    // --- The Smart Click Logic ---
-    upiLink.onclick = function(e) {
-      e.preventDefault();
-      
-      // Check if the user is browsing on a mobile phone
-      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-      
-      if (isMobile) {
-        // They are on a phone: Launch the UPI app natively!
-        window.location.href = "upi://pay?pa=aaravaggarwal3535@okicici&pn=Aarav%20Aggarwal&cu=INR";
-      } else {
-        // They are on a computer: Copy the ID and show a premium toast notification
-        navigator.clipboard.writeText("aaravaggarwal3535@okicici").then(() => {
-          showToast("UPI ID Copied: aaravaggarwal3535@okicici");
-        });
-      }
-    };
-
     // 4. Attach buttons to the container, then inject into the page
     container.appendChild(kofiLink);
-    container.appendChild(upiLink);
     document.body.appendChild(container);
   }
 });

@@ -2018,3 +2018,396 @@ std::shared_ptr<Tensor> run_cuda_cross_entropy_backward(std::shared_ptr<Tensor> 
     if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
     return grad;
 }
+
+__global__ void bce_forward_reduce_kernel(const float* __restrict__ pred, const float* __restrict__ target,
+                                           float* __restrict__ partial_sums, int n) {
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x * 2 + threadIdx.x;
+    const float eps = 1e-7f;
+
+    float sum = 0.0f;
+    if (idx < n) {
+        float p = pred[idx], t = target[idx];
+        sum += -(t * logf(p + eps) + (1.0f - t) * logf(1.0f - p + eps));
+    }
+    if (idx + blockDim.x < n) {
+        float p = pred[idx + blockDim.x], t = target[idx + blockDim.x];
+        sum += -(t * logf(p + eps) + (1.0f - t) * logf(1.0f - p + eps));
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) partial_sums[blockIdx.x] = sdata[0];
+}
+
+__global__ void bce_backward_kernel(const float* __restrict__ pred, const float* __restrict__ target,
+                                     float* __restrict__ grad_pred, float grad_scale, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    const float eps = 1e-7f;
+    for (int i = idx; i < n; i += stride) {
+        float p = pred[i], t = target[i];
+        float d = -(t / (p + eps) - (1.0f - t) / (1.0f - p + eps));
+        grad_pred[i] = d * grad_scale;
+    }
+}
+
+std::pair<float, int> run_cuda_bce_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target) {
+    if (!pred->is_contiguous() || !target->is_contiguous())
+        throw std::invalid_argument("BCELoss requires contiguous tensors. Call .contiguous() first.");
+    int n = pred->size;
+    if (n == 0) throw std::runtime_error("BCELoss: cannot reduce an empty tensor");
+    int threads = 256;
+    int blocks = (n + threads * 2 - 1) / (threads * 2);
+    float* d_partial;
+    cudaMalloc(&d_partial, blocks * sizeof(float));
+    bce_forward_reduce_kernel<<<blocks, threads, threads * sizeof(float)>>>(pred->fptr(), target->fptr(), d_partial, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) { cudaFree(d_partial); throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err)); }
+    float total = reduce_partials_to_scalar(d_partial, blocks);  // reuses the helper from HuberLoss's fusion
+    return {total, n};
+}
+
+std::shared_ptr<Tensor> run_cuda_bce_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float grad_scale) {
+    auto result = std::make_shared<Tensor>(pred->shape, std::string("cuda"));
+    int n = pred->size;
+    if (n == 0) return result;
+    bce_backward_kernel<<<elem_blocks(n), 256>>>(pred->fptr(), target->fptr(), result->fptr(), grad_scale, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+__global__ void smoothl1_forward_reduce_kernel(const float* __restrict__ pred, const float* __restrict__ target,
+                                                float* __restrict__ partial_sums, float beta, int n) {
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x * 2 + threadIdx.x;
+
+    float sum = 0.0f;
+    if (idx < n) {
+        float d = fabsf(pred[idx] - target[idx]);
+        sum += (d < beta) ? 0.5f * d * d / beta : d - 0.5f * beta;
+    }
+    if (idx + blockDim.x < n) {
+        float d = fabsf(pred[idx + blockDim.x] - target[idx + blockDim.x]);
+        sum += (d < beta) ? 0.5f * d * d / beta : d - 0.5f * beta;
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) partial_sums[blockIdx.x] = sdata[0];
+}
+
+__global__ void smoothl1_backward_kernel(const float* __restrict__ pred, const float* __restrict__ target,
+                                          float* __restrict__ grad_pred, float beta, float grad_scale, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        float diff = pred[i] - target[i];
+        float ad = fabsf(diff);
+        float g = (ad < beta) ? diff / beta : (diff > 0.0f ? 1.0f : -1.0f);
+        grad_pred[i] = g * grad_scale;
+    }
+}
+
+std::pair<float, int> run_cuda_smoothl1_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float beta) {
+    if (!pred->is_contiguous() || !target->is_contiguous())
+        throw std::invalid_argument("SmoothL1Loss requires contiguous tensors. Call .contiguous() first.");
+    int n = pred->size;
+    if (n == 0) throw std::runtime_error("SmoothL1Loss: cannot reduce an empty tensor");
+    int threads = 256;
+    int blocks = (n + threads * 2 - 1) / (threads * 2);
+    float* d_partial;
+    cudaMalloc(&d_partial, blocks * sizeof(float));
+    smoothl1_forward_reduce_kernel<<<blocks, threads, threads * sizeof(float)>>>(pred->fptr(), target->fptr(), d_partial, beta, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) { cudaFree(d_partial); throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err)); }
+    float total = reduce_partials_to_scalar(d_partial, blocks);
+    return {total, n};
+}
+
+std::shared_ptr<Tensor> run_cuda_smoothl1_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float beta, float grad_scale) {
+    auto result = std::make_shared<Tensor>(pred->shape, std::string("cuda"));
+    int n = pred->size;
+    if (n == 0) return result;
+    smoothl1_backward_kernel<<<elem_blocks(n), 256>>>(pred->fptr(), target->fptr(), result->fptr(), beta, grad_scale, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+__global__ void multimargin_forward_kernel(const float* __restrict__ logits, const float* __restrict__ onehot,
+                                            float* __restrict__ per_row_loss, float margin, int C) {
+    extern __shared__ float sdata[];
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    const float* row_logits = logits + (long long)row * C;
+    const float* row_onehot = onehot + (long long)row * C;
+
+    // Find correct-class score via a reduction: sum(logits * onehot) picks
+    // out exactly the one nonzero (correct-class) entry.
+    float local = 0.0f;
+    for (int c = tid; c < C; c += blockDim.x) local += row_logits[c] * row_onehot[c];
+    sdata[tid] = local;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    float correct_score = sdata[0];
+    __syncthreads();
+
+    float local_loss = 0.0f;
+    for (int c = tid; c < C; c += blockDim.x) {
+        if (row_onehot[c] > 0.5f) continue;  // skip the correct class itself
+        float m = margin - correct_score + row_logits[c];
+        local_loss += (m > 0.0f) ? m : 0.0f;
+    }
+    sdata[tid] = local_loss;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) per_row_loss[row] = sdata[0] / C;
+}
+
+__global__ void multimargin_backward_kernel(const float* __restrict__ logits, const float* __restrict__ onehot,
+                                             float* __restrict__ grad_logits, float margin, float grad_scale, int C) {
+    extern __shared__ float sdata[];
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    const float* row_logits = logits + (long long)row * C;
+    const float* row_onehot = onehot + (long long)row * C;
+    float* row_grad = grad_logits + (long long)row * C;
+
+    float local = 0.0f;
+    for (int c = tid; c < C; c += blockDim.x) local += row_logits[c] * row_onehot[c];
+    sdata[tid] = local;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    float correct_score = sdata[0];
+    __syncthreads();
+
+    // Count how many "active" (margin-violating) classes there are, to
+    // assign the correct-class gradient (-count/C), while each active
+    // wrong-class gets (+1/C).
+    float local_count = 0.0f;
+    for (int c = tid; c < C; c += blockDim.x) {
+        if (row_onehot[c] > 0.5f) continue;
+        float m = margin - correct_score + row_logits[c];
+        if (m > 0.0f) local_count += 1.0f;
+    }
+    sdata[tid] = local_count;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    float active_count = sdata[0];
+    __syncthreads();
+
+    for (int c = tid; c < C; c += blockDim.x) {
+        if (row_onehot[c] > 0.5f) {
+            row_grad[c] = (-active_count / C) * grad_scale;
+        } else {
+            float m = margin - correct_score + row_logits[c];
+            row_grad[c] = ((m > 0.0f) ? (1.0f / C) : 0.0f) * grad_scale;
+        }
+    }
+}
+
+std::shared_ptr<Tensor> run_cuda_multimargin_per_row(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot, float margin) {
+    if (!logits->is_contiguous() || !onehot->is_contiguous())
+        throw std::invalid_argument("MultiMarginLoss requires contiguous tensors. Call .contiguous() first.");
+    int N = logits->shape[0], C = logits->shape[1];
+    auto per_row = std::make_shared<Tensor>(std::vector<int>{N}, std::string("cuda"));
+    int threads = 256;
+    multimargin_forward_kernel<<<N, threads, threads * sizeof(float)>>>(logits->fptr(), onehot->fptr(), per_row->fptr(), margin, C);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return per_row;
+}
+
+std::shared_ptr<Tensor> run_cuda_multimargin_backward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot, float margin, float grad_scale) {
+    auto grad = std::make_shared<Tensor>(logits->shape, std::string("cuda"));
+    int N = logits->shape[0], C = logits->shape[1];
+    int threads = 256;
+    multimargin_backward_kernel<<<N, threads, threads * sizeof(float)>>>(logits->fptr(), onehot->fptr(), grad->fptr(), margin, grad_scale, C);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return grad;
+}
+
+__global__ void mse_forward_reduce_kernel(const float* __restrict__ pred, const float* __restrict__ target,
+                                           float* __restrict__ partial_sums, int n) {
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x * 2 + threadIdx.x;
+    float sum = 0.0f;
+    if (idx < n) { float d = pred[idx] - target[idx]; sum += d * d; }
+    if (idx + blockDim.x < n) { float d = pred[idx + blockDim.x] - target[idx + blockDim.x]; sum += d * d; }
+    sdata[tid] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) partial_sums[blockIdx.x] = sdata[0];
+}
+
+__global__ void mse_backward_kernel(const float* __restrict__ pred, const float* __restrict__ target,
+                                     float* __restrict__ grad_pred, float grad_scale, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride)
+        grad_pred[i] = 2.0f * (pred[i] - target[i]) * grad_scale;
+}
+
+std::pair<float, int> run_cuda_mse_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target) {
+    if (!pred->is_contiguous() || !target->is_contiguous())
+        throw std::invalid_argument("MSELoss requires contiguous tensors. Call .contiguous() first.");
+    int n = pred->size;
+    if (n == 0) throw std::runtime_error("MSELoss: cannot reduce an empty tensor");
+    int threads = 256;
+    int blocks = (n + threads * 2 - 1) / (threads * 2);
+    float* d_partial;
+    cudaMalloc(&d_partial, blocks * sizeof(float));
+    mse_forward_reduce_kernel<<<blocks, threads, threads * sizeof(float)>>>(pred->fptr(), target->fptr(), d_partial, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) { cudaFree(d_partial); throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err)); }
+    float total = reduce_partials_to_scalar(d_partial, blocks);  // reuses HuberLoss's existing helper
+    return {total, n};
+}
+
+std::shared_ptr<Tensor> run_cuda_mse_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float grad_scale) {
+    auto result = std::make_shared<Tensor>(pred->shape, std::string("cuda"));
+    int n = pred->size;
+    if (n == 0) return result;
+    mse_backward_kernel<<<elem_blocks(n), 256>>>(pred->fptr(), target->fptr(), result->fptr(), grad_scale, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+__global__ void nll_forward_kernel(const float* __restrict__ log_probs, const float* __restrict__ onehot,
+                                    float* __restrict__ per_row_loss, int C) {
+    extern __shared__ float sdata[];
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    const float* row_lp = log_probs + (long long)row * C;
+    const float* row_oh = onehot + (long long)row * C;
+
+    float local = 0.0f;
+    for (int c = tid; c < C; c += blockDim.x) local += -row_oh[c] * row_lp[c];
+    sdata[tid] = local;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) per_row_loss[row] = sdata[0];
+}
+
+__global__ void nll_backward_kernel(const float* __restrict__ onehot, float* __restrict__ grad_log_probs,
+                                     float grad_scale, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride)
+        grad_log_probs[i] = -onehot[i] * grad_scale;
+}
+
+std::shared_ptr<Tensor> run_cuda_nll_per_row(std::shared_ptr<Tensor> log_probs, std::shared_ptr<Tensor> onehot) {
+    if (!log_probs->is_contiguous() || !onehot->is_contiguous())
+        throw std::invalid_argument("NLLLoss requires contiguous tensors. Call .contiguous() first.");
+    int N = log_probs->shape[0], C = log_probs->shape[1];
+    auto per_row = std::make_shared<Tensor>(std::vector<int>{N}, std::string("cuda"));
+    int threads = 256;
+    nll_forward_kernel<<<N, threads, threads * sizeof(float)>>>(log_probs->fptr(), onehot->fptr(), per_row->fptr(), C);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return per_row;
+}
+
+std::shared_ptr<Tensor> run_cuda_nll_backward(std::shared_ptr<Tensor> onehot, float grad_scale) {
+    auto result = std::make_shared<Tensor>(onehot->shape, std::string("cuda"));
+    int n = onehot->size;
+    if (n == 0) return result;
+    nll_backward_kernel<<<elem_blocks(n), 256>>>(onehot->fptr(), result->fptr(), grad_scale, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
+
+__global__ void bce_logits_forward_reduce_kernel(const float* __restrict__ logits, const float* __restrict__ target,
+                                                   float* __restrict__ partial_sums, int n) {
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x * 2 + threadIdx.x;
+    float sum = 0.0f;
+    if (idx < n) {
+        float x = logits[idx], t = target[idx];
+        float max_term = x > 0.0f ? x : 0.0f;
+        sum += max_term - x * t + log1pf(expf(-fabsf(x)));
+    }
+    if (idx + blockDim.x < n) {
+        float x = logits[idx + blockDim.x], t = target[idx + blockDim.x];
+        float max_term = x > 0.0f ? x : 0.0f;
+        sum += max_term - x * t + log1pf(expf(-fabsf(x)));
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) partial_sums[blockIdx.x] = sdata[0];
+}
+
+__global__ void bce_logits_backward_kernel(const float* __restrict__ logits, const float* __restrict__ target,
+                                            float* __restrict__ grad_logits, float grad_scale, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = idx; i < n; i += stride) {
+        // d/dx [max(x,0) - x*t + log(1+exp(-|x|))] = sigmoid(x) - t
+        float sig = 1.0f / (1.0f + expf(-logits[i]));
+        grad_logits[i] = (sig - target[i]) * grad_scale;
+    }
+}
+
+std::pair<float, int> run_cuda_bce_logits_forward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> target) {
+    if (!logits->is_contiguous() || !target->is_contiguous())
+        throw std::invalid_argument("BCEWithLogitsLoss requires contiguous tensors. Call .contiguous() first.");
+    int n = logits->size;
+    if (n == 0) throw std::runtime_error("BCEWithLogitsLoss: cannot reduce an empty tensor");
+    int threads = 256;
+    int blocks = (n + threads * 2 - 1) / (threads * 2);
+    float* d_partial;
+    cudaMalloc(&d_partial, blocks * sizeof(float));
+    bce_logits_forward_reduce_kernel<<<blocks, threads, threads * sizeof(float)>>>(logits->fptr(), target->fptr(), d_partial, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) { cudaFree(d_partial); throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err)); }
+    float total = reduce_partials_to_scalar(d_partial, blocks);
+    return {total, n};
+}
+
+std::shared_ptr<Tensor> run_cuda_bce_logits_backward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> target, float grad_scale) {
+    auto result = std::make_shared<Tensor>(logits->shape, std::string("cuda"));
+    int n = logits->size;
+    if (n == 0) return result;
+    bce_logits_backward_kernel<<<elem_blocks(n), 256>>>(logits->fptr(), target->fptr(), result->fptr(), grad_scale, n);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err));
+    return result;
+}
