@@ -1,0 +1,3 @@
+include src/*.h
+include src/*.cuh
+include README.md

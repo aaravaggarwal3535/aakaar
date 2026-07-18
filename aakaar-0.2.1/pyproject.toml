@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel", "pybind11>=2.10"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aakaar"
+version = "0.2.1"
+description = "A custom CUDA-accelerated ML library"
+readme = "README.md"
+authors = [{name = "Aarav Aggarwal"}]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pillow",
+    "nvidia-cuda-runtime; sys_platform == 'win32' or sys_platform == 'linux'",
+    "nvidia-curand; sys_platform == 'win32' or sys_platform == 'linux'",
+    "nvidia-cublas; sys_platform == 'win32' or sys_platform == 'linux'",
+    "nvidia-cudnn-cu13; sys_platform == 'win32' or sys_platform == 'linux'",
+]
