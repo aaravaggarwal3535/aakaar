@@ -877,14 +877,9 @@ static std::shared_ptr<Tensor> dispatch_im2col_1d(std::shared_ptr<Tensor> x, int
     return result;
 }
 
+#ifdef AAKAAR_HAS_CUDNN
 static std::shared_ptr<Tensor> dispatch_conv1d_cudnn(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
                                                        int stride, int padding, int dilation) {
-#if defined(AAKAAR_NO_CUDA) || !defined(AAKAAR_HAS_CUDNN)
-    throw std::runtime_error(
-        "conv1d_cudnn: this build of aakaar was compiled without cuDNN support "
-        "(cudnn.h was not found at build time). Use aakaar.conv1d(), which "
-        "automatically falls back to the im2col+cuBLAS path, instead.");
-#else
     if (x->device != "cuda" || w->device != "cuda")
         throw std::runtime_error("conv1d_cudnn: both input and weight must be on device='cuda'.");
     if (x->dtype != DType::FLOAT32 || w->dtype != DType::FLOAT32)
@@ -918,8 +913,8 @@ static std::shared_ptr<Tensor> dispatch_conv1d_cudnn(std::shared_ptr<Tensor> x, 
         y->grad_fn = node;
     }
     return y;
-#endif
 }
+#endif  // AAKAAR_HAS_CUDNN
 
 
 // Sums `grad` down to `target_shape` following numpy/torch broadcasting-gradient
