@@ -1670,7 +1670,7 @@ PYBIND11_MODULE(_C, m) {
           py::arg("x"), py::arg("kernel_size"), py::arg("stride"),
           py::arg("padding"), py::arg("dilation"), py::arg("out_length"));
 
-    #ifndef AAKAAR_NO_CUDA
+#ifndef AAKAAR_NO_CUDA
     m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");
     m.def("generate_randint", &run_curand_randint);
     m.def("cuda_matmul", &dispatch_matmul, "cuBLAS GPU matrix multiplication");
@@ -1686,17 +1686,18 @@ PYBIND11_MODULE(_C, m) {
     });
     m.attr("HAS_CUDA") = true;
 
-    #ifdef AAKAAR_HAS_CUDNN
+#ifdef AAKAAR_HAS_CUDNN
     m.def("conv1d_cudnn", &dispatch_conv1d_cudnn,
           py::arg("x"), py::arg("w"), py::arg("stride"), py::arg("padding"), py::arg("dilation"));
     m.def("_set_cudnn_tf32_enabled", &set_cudnn_tf32_enabled);
     m.def("_get_cudnn_tf32_enabled", &get_cudnn_tf32_enabled);
     m.attr("HAS_CUDNN") = true;
-    #else
+#else
     m.attr("HAS_CUDNN") = false;
-    #endif
+#endif
 
-    #else
+#else
     m.attr("HAS_CUDA") = false;
     m.attr("HAS_CUDNN") = false;
-    #endif
+#endif
+}
