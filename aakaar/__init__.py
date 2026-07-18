@@ -256,10 +256,11 @@ def im2col_1d(x, kernel_size, stride, padding, dilation, out_length):
     return _C.im2col_1d(x, kernel_size, stride, padding, dilation, out_length)
 def conv1d(x, weight, stride=1, padding=0, dilation=1):
     """Fastest available Conv1d forward+backward. Routes to cuDNN for
-    float32 CUDA tensors (matches torch's actual backend); falls back to
-    im2col + matmul (cuBLAS/OpenBLAS) for CPU tensors or float64/int32/int64,
-    which cuDNN doesn't support well or at all."""
-    use_cudnn = (_C.HAS_CUDA and x.device == "cuda" and weight.device == "cuda"
+    float32 CUDA tensors when this build was compiled with cuDNN support;
+    falls back to im2col + matmul (cuBLAS/OpenBLAS) otherwise — for CPU
+    tensors, float64/int32/int64 dtypes, or builds where cuDNN wasn't
+    found at compile time."""
+    use_cudnn = (getattr(_C, "HAS_CUDNN", False) and x.device == "cuda" and weight.device == "cuda"
                  and x.dtype == "float32" and weight.dtype == "float32")
     if use_cudnn:
         return _C.conv1d_cudnn(x, weight, stride, padding, dilation)
