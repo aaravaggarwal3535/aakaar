@@ -4,6 +4,15 @@
 #include <stdexcept>
 #include <vector>
 #include "tensor.h"
+#include <unordered_map>
+
+struct VecIntHash {
+    size_t operator()(const std::vector<int>& v) const {
+        size_t h = v.size();
+        for (int x : v) h ^= std::hash<int>{}(x) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
 
 // Expose the global TF32 flag from matmul_kernel.cu
 extern bool get_tf32_enabled();
@@ -78,9 +87,9 @@ struct Conv1dCacheEntry {
 
 // Keyed on every shape/param that affects descriptor or algo choice. Separate
 // caches per op since forward/bwd-data/bwd-filter each pick their own algo.
-static std::map<std::vector<int>, Conv1dCacheEntry> g_fwd_cache;
-static std::map<std::vector<int>, Conv1dCacheEntry> g_bwd_data_cache;
-static std::map<std::vector<int>, Conv1dCacheEntry> g_bwd_filter_cache;
+static std::unordered_map<std::vector<int>, Conv1dCacheEntry, VecIntHash> g_fwd_cache;
+static std::unordered_map<std::vector<int>, Conv1dCacheEntry, VecIntHash> g_bwd_data_cache;
+static std::unordered_map<std::vector<int>, Conv1dCacheEntry, VecIntHash> g_bwd_filter_cache;
 
 static std::shared_ptr<Tensor> get_workspace(size_t ws_bytes) {
     if (ws_bytes == 0) return nullptr;
@@ -170,8 +179,9 @@ std::shared_ptr<Tensor> run_cudnn_conv1d_forward(std::shared_ptr<Tensor> x, std:
         if (best == -1)
             throw std::runtime_error("conv1d_cudnn: all forward algorithm candidates reported failure status.");
         fprintf(stderr, "[conv1d_cudnn] shape=(%d,%d,%d)->(%d,%d,%d) K=%d chosen algo=%d time=%.4fms workspace=%zuMB\n",
-        B, C_in, L_in, B, C_out, L_out, K, (int)perf_results[best].algo,
-        perf_results[best].time, perf_results[best].memory / (1024*1024));
+            B, C_in, L_in, B, C_out, L_out, K, (int)perf_results[best].algo,
+            perf_results[best].time, perf_results[best].memory / (1024*1024));
+        fflush(stderr);
 
         auto* algo_storage = new cudnnConvolutionFwdAlgo_t(perf_results[best].algo);
         entry.algo_data = algo_storage;

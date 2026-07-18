@@ -138,6 +138,7 @@ std::shared_ptr<Tensor> run_cuda_abs_typed(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_abs_backward_typed(std::shared_ptr<Tensor> grad_out, std::shared_ptr<Tensor> input);
 std::shared_ptr<Tensor> run_cuda_sign(std::shared_ptr<Tensor> a);
 std::shared_ptr<Tensor> run_cuda_sign_typed(std::shared_ptr<Tensor> a);
+#if !defined(AAKAAR_NO_CUDA) && defined(AAKAAR_HAS_CUDNN)
 std::shared_ptr<Tensor> run_cudnn_conv1d_forward(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
                                                    int stride, int padding, int dilation, int L_out);
 std::shared_ptr<Tensor> run_cudnn_conv1d_backward_data(std::shared_ptr<Tensor> grad_y, std::shared_ptr<Tensor> w,
@@ -146,6 +147,7 @@ std::shared_ptr<Tensor> run_cudnn_conv1d_backward_data(std::shared_ptr<Tensor> g
 std::shared_ptr<Tensor> run_cudnn_conv1d_backward_filter(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> grad_y,
                                                            int C_out, int K, int stride, int padding,
                                                            int dilation, int L_out);
+#endif
 std::pair<float, std::shared_ptr<Tensor>> run_cuda_huber_loss_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta);
 std::shared_ptr<Tensor> run_cuda_huber_loss_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta, float grad_scale);
 std::shared_ptr<Tensor> run_cuda_cross_entropy_per_row(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> onehot);
@@ -877,8 +879,11 @@ static std::shared_ptr<Tensor> dispatch_im2col_1d(std::shared_ptr<Tensor> x, int
 
 static std::shared_ptr<Tensor> dispatch_conv1d_cudnn(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
                                                        int stride, int padding, int dilation) {
-#ifdef AAKAAR_NO_CUDA
-    throw std::runtime_error("conv1d_cudnn: this build of aakaar has no CUDA/cuDNN support.");
+#if defined(AAKAAR_NO_CUDA) || !defined(AAKAAR_HAS_CUDNN)
+    throw std::runtime_error(
+        "conv1d_cudnn: this build of aakaar was compiled without cuDNN support "
+        "(cudnn.h was not found at build time). Use aakaar.conv1d(), which "
+        "automatically falls back to the im2col+cuBLAS path, instead.");
 #else
     if (x->device != "cuda" || w->device != "cuda")
         throw std::runtime_error("conv1d_cudnn: both input and weight must be on device='cuda'.");
@@ -1666,7 +1671,10 @@ PYBIND11_MODULE(_C, m) {
       "Create a Tensor from an existing numpy array, preserving its dtype (float32/float64/int32/int64).");
     m.def("is_available", &cuda_is_available, "Check if a CUDA-capable GPU is actually present and usable");
     m.def("device_count", &cuda_device_count, "Number of CUDA-capable GPUs detected");
-    
+    m.def("im2col_1d", &dispatch_im2col_1d,
+          py::arg("x"), py::arg("kernel_size"), py::arg("stride"),
+          py::arg("padding"), py::arg("dilation"), py::arg("out_length"));
+
     #ifndef AAKAAR_NO_CUDA
     m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");
     m.def("generate_randint", &run_curand_randint);
@@ -1675,24 +1683,25 @@ PYBIND11_MODULE(_C, m) {
     m.def("_set_tf32_enabled", &set_tf32_enabled);
     m.def("_get_tf32_enabled", &get_tf32_enabled);
     m.def("_synchronize", &cuda_synchronize);
-    m.def("im2col_1d", &dispatch_im2col_1d,
-          py::arg("x"), py::arg("kernel_size"), py::arg("stride"),
-          py::arg("padding"), py::arg("dilation"), py::arg("out_length"));
-    m.def("conv1d_cudnn", &dispatch_conv1d_cudnn,
-          py::arg("x"), py::arg("w"), py::arg("stride"), py::arg("padding"), py::arg("dilation"));
     m.def("_huber_loss_fused", &dispatch_huber_loss, py::arg("pred"), py::arg("target"), py::arg("delta") = 1.0f);
     m.def("_cross_entropy_fused", &dispatch_cross_entropy_fused, py::arg("logits"), py::arg("onehot"));
+    m.def("_allocator_stats", []() -> py::tuple {
+        auto [hits, misses] = CachingAllocator::get_instance().get_stats();
+        return py::make_tuple(hits, misses);
+    });
+    m.attr("HAS_CUDA") = true;
+
+    #ifdef AAKAAR_HAS_CUDNN
+    m.def("conv1d_cudnn", &dispatch_conv1d_cudnn,
+          py::arg("x"), py::arg("w"), py::arg("stride"), py::arg("padding"), py::arg("dilation"));
     m.def("_set_cudnn_tf32_enabled", &set_cudnn_tf32_enabled);
     m.def("_get_cudnn_tf32_enabled", &get_cudnn_tf32_enabled);
-    m.def("_allocator_stats", []() -> py::tuple {
-    auto [hits, misses] = CachingAllocator::get_instance().get_stats();
-    return py::make_tuple(hits, misses);
-});
-    m.attr("HAS_CUDA") = true;
-#else
+    m.attr("HAS_CUDNN") = true;
+    #else
+    m.attr("HAS_CUDNN") = false;
+    #endif
+
+    #else
     m.attr("HAS_CUDA") = false;
-#endif
-    m.def("im2col_1d", &dispatch_im2col_1d,
-          py::arg("x"), py::arg("kernel_size"), py::arg("stride"),
-          py::arg("padding"), py::arg("dilation"), py::arg("out_length"));
-}
+    m.attr("HAS_CUDNN") = false;
+    #endif
