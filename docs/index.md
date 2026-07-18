@@ -1,7 +1,7 @@
 <h1 align="center" style="display: flex; align-items: center; justify-content: center; gap: 15px;">
   <img src="assets/aakaar_logo.svg" alt="Aakaar Logo" width="60" style="vertical-align: middle;"/>
   <span style="vertical-align: middle;">Aakaar</span>
-  <img src="https://img.shields.io/badge/version-v0.1.13-indigo?style=for-the-badge" alt="Version 0.2.1" style="vertical-align: middle; height: 28px;">
+  <img src="https://img.shields.io/badge/version-v0.2.1-indigo?style=for-the-badge" alt="Version 0.2.1" style="vertical-align: middle; height: 28px;">
 </h1>
 
 <p align="center">
