@@ -396,7 +396,7 @@ print(f"cuDNN detected: {CUDNN_PATHS is not None}" + ("" if CUDNN_PATHS is None 
 
 setup(
     name="aakaar",
-    version="0.2.0",
+    version="0.2.1",
     author="Aarav Aggarwal",
     description="A custom standalone ML library featuring CUDA-accelerated operations (CPU fallback supported).",
     packages=["aakaar", "aakaar._openblas_bin"],
