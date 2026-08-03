@@ -6,6 +6,7 @@
 #include <vector>
 #include <stdexcept>
 #include <iostream>
+#include <string>
 #endif // AAKAAR_NO_CUDA
 
 class CachingAllocator {
@@ -37,7 +38,10 @@ public:
         float* ptr;
         cudaError_t err = cudaMalloc((void**)&ptr, size * sizeof(float));
         if (err != cudaSuccess) {
-            throw std::runtime_error("Aakaar out of memory!");
+            throw std::runtime_error(std::string("Aakaar CUDA allocation failed: ") + cudaGetErrorString(err) +
+                                      " (requested " + std::to_string((size_t)size * sizeof(float)) + " bytes, "
+                                      "cache had " + std::to_string(cache_hits) + " hits / " +
+                                      std::to_string(cache_misses) + " misses so far)");
         }
         return ptr;
     }

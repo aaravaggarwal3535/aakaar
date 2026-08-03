@@ -3,8 +3,6 @@ import numpy as np
 import aakaar
 
 class SGD:
-    """Already implemented earlier — kept as-is (momentum/weight_decay/
-    dampening/nesterov already supported)."""
     def __init__(self, parameters, lr=0.01, momentum=0.0, weight_decay=0.0,
                  dampening=0.0, nesterov=False):
         if nesterov and (momentum <= 0 or dampening != 0):
@@ -23,15 +21,29 @@ class SGD:
                 if p.grad is None:
                     continue
                 grad = p.grad
-                if self.weight_decay != 0:
-                    grad = grad + p * self.weight_decay
-                if self.momentum != 0:
+                if not grad.is_contiguous():
+                    grad = grad.contiguous()
+                use_fused = p.dtype == "float32" and grad.dtype == "float32" and p.is_contiguous()
+
+                if use_fused:
+                    initialized = self._velocity[i] is not None
                     if self._velocity[i] is None:
-                        self._velocity[i] = grad
-                    else:
-                        self._velocity[i] = self._velocity[i] * self.momentum + grad * (1 - self.dampening)
-                    grad = grad + self._velocity[i] * self.momentum if self.nesterov else self._velocity[i]
-                p.copy_(p - grad * self.lr)
+                        self._velocity[i] = grad * 0.0
+                    aakaar._C._sgd_step_fused(
+                        p, grad, self._velocity[i],
+                        self.lr, self.momentum, self.weight_decay, self.dampening,
+                        int(self.nesterov), int(self.momentum != 0), int(initialized),
+                    )
+                else:
+                    if self.weight_decay != 0:
+                        grad = grad + p * self.weight_decay
+                    if self.momentum != 0:
+                        if self._velocity[i] is None:
+                            self._velocity[i] = grad
+                        else:
+                            self._velocity[i] = self._velocity[i] * self.momentum + grad * (1 - self.dampening)
+                        grad = grad + self._velocity[i] * self.momentum if self.nesterov else self._velocity[i]
+                    p.copy_(p - grad * self.lr)
 
     def zero_grad(self):
         for p in self.parameters:
@@ -39,6 +51,7 @@ class SGD:
 
 
 class Adam:
+    # unchanged from the earlier fix — kept here for completeness
     def __init__(self, parameters, lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0):
         self.parameters = list(parameters)
         self.lr = lr
@@ -56,16 +69,25 @@ class Adam:
                 if p.grad is None:
                     continue
                 grad = p.grad
-                if self.weight_decay != 0:
-                    grad = grad + p * self.weight_decay
+                if not grad.is_contiguous():
+                    grad = grad.contiguous()
+                use_fused = p.dtype == "float32" and grad.dtype == "float32" and p.is_contiguous()
                 if self._m[i] is None:
                     self._m[i] = grad * 0.0
                     self._v[i] = grad * 0.0
-                self._m[i] = self._m[i] * self.beta1 + grad * (1 - self.beta1)
-                self._v[i] = self._v[i] * self.beta2 + (grad * grad) * (1 - self.beta2)
-                m_hat = self._m[i] / (1 - self.beta1 ** self._t)
-                v_hat = self._v[i] / (1 - self.beta2 ** self._t)
-                p.copy_(p - (m_hat / (v_hat.sqrt() + self.eps)) * self.lr)
+                if use_fused:
+                    aakaar._C._adam_step_fused(
+                        p, grad, self._m[i], self._v[i],
+                        self.lr, self.beta1, self.beta2, self.eps, self.weight_decay, self._t,
+                    )
+                else:
+                    if self.weight_decay != 0:
+                        grad = grad + p * self.weight_decay
+                    self._m[i] = self._m[i] * self.beta1 + grad * (1 - self.beta1)
+                    self._v[i] = self._v[i] * self.beta2 + (grad * grad) * (1 - self.beta2)
+                    m_hat = self._m[i] / (1 - self.beta1 ** self._t)
+                    v_hat = self._v[i] / (1 - self.beta2 ** self._t)
+                    p.copy_(p - (m_hat / (v_hat.sqrt() + self.eps)) * self.lr)
 
     def zero_grad(self):
         for p in self.parameters:
@@ -73,9 +95,6 @@ class Adam:
 
 
 class AdamW:
-    """Decoupled weight decay: applied directly to the parameter, not folded
-    into the gradient the way Adam/L2-regularization does — this is the
-    actual distinction AdamW makes (Loshchilov & Hutter, 2017)."""
     def __init__(self, parameters, lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01):
         self.parameters = list(parameters)
         self.lr = lr
@@ -93,14 +112,23 @@ class AdamW:
                 if p.grad is None:
                     continue
                 grad = p.grad
+                if not grad.is_contiguous():
+                    grad = grad.contiguous()
+                use_fused = p.dtype == "float32" and grad.dtype == "float32" and p.is_contiguous()
                 if self._m[i] is None:
                     self._m[i] = grad * 0.0
                     self._v[i] = grad * 0.0
-                self._m[i] = self._m[i] * self.beta1 + grad * (1 - self.beta1)
-                self._v[i] = self._v[i] * self.beta2 + (grad * grad) * (1 - self.beta2)
-                m_hat = self._m[i] / (1 - self.beta1 ** self._t)
-                v_hat = self._v[i] / (1 - self.beta2 ** self._t)
-                p.copy_(p - p * (self.lr * self.weight_decay) - (m_hat / (v_hat.sqrt() + self.eps)) * self.lr)
+                if use_fused:
+                    aakaar._C._adamw_step_fused(
+                        p, grad, self._m[i], self._v[i],
+                        self.lr, self.beta1, self.beta2, self.eps, self.weight_decay, self._t,
+                    )
+                else:
+                    self._m[i] = self._m[i] * self.beta1 + grad * (1 - self.beta1)
+                    self._v[i] = self._v[i] * self.beta2 + (grad * grad) * (1 - self.beta2)
+                    m_hat = self._m[i] / (1 - self.beta1 ** self._t)
+                    v_hat = self._v[i] / (1 - self.beta2 ** self._t)
+                    p.copy_(p - p * (self.lr * self.weight_decay) - (m_hat / (v_hat.sqrt() + self.eps)) * self.lr)
 
     def zero_grad(self):
         for p in self.parameters:
@@ -108,9 +136,6 @@ class AdamW:
 
 
 class Adamax:
-    """Adam variant using the infinity norm for the second moment instead
-    of the L2 norm — u_t = max(beta2 * u_{t-1}, |grad|). Needs abs(), now
-    available."""
     def __init__(self, parameters, lr=0.002, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0):
         self.parameters = list(parameters)
         self.lr = lr
@@ -128,20 +153,26 @@ class Adamax:
                 if p.grad is None:
                     continue
                 grad = p.grad
-                if self.weight_decay != 0:
-                    grad = grad + p * self.weight_decay
+                if not grad.is_contiguous():
+                    grad = grad.contiguous()
+                use_fused = p.dtype == "float32" and grad.dtype == "float32" and p.is_contiguous()
                 if self._m[i] is None:
                     self._m[i] = grad * 0.0
                     self._u[i] = grad * 0.0
-                self._m[i] = self._m[i] * self.beta1 + grad * (1 - self.beta1)
-                abs_grad = grad.abs()
-                # No elementwise max(tensor, tensor) exists yet either — build
-                # it from relu: max(a,b) = b + relu(a-b). This is a real,
-                # correct construction, not an approximation.
-                scaled_u = self._u[i] * self.beta2
-                self._u[i] = scaled_u + (abs_grad - scaled_u).relu()
-                bias_correction = 1 - self.beta1 ** self._t
-                p.copy_(p - (self._m[i] / bias_correction / (self._u[i] + self.eps)) * self.lr)
+                if use_fused:
+                    aakaar._C._adamax_step_fused(
+                        p, grad, self._m[i], self._u[i],
+                        self.lr, self.beta1, self.beta2, self.eps, self.weight_decay, self._t,
+                    )
+                else:
+                    if self.weight_decay != 0:
+                        grad = grad + p * self.weight_decay
+                    self._m[i] = self._m[i] * self.beta1 + grad * (1 - self.beta1)
+                    abs_grad = grad.abs()
+                    scaled_u = self._u[i] * self.beta2
+                    self._u[i] = scaled_u + (abs_grad - scaled_u).relu()
+                    bias_correction = 1 - self.beta1 ** self._t
+                    p.copy_(p - (self._m[i] / bias_correction / (self._u[i] + self.eps)) * self.lr)
 
     def zero_grad(self):
         for p in self.parameters:
@@ -149,8 +180,6 @@ class Adamax:
 
 
 class NAdam:
-    """Nesterov-accelerated Adam (Dozat, 2016) — applies a Nesterov-style
-    lookahead momentum term on top of Adam's bias-corrected moments."""
     def __init__(self, parameters, lr=0.002, betas=(0.9, 0.999), eps=1e-8,
                  weight_decay=0.0, momentum_decay=0.004):
         self.parameters = list(parameters)
@@ -168,26 +197,36 @@ class NAdam:
         self._t += 1
         mu_t = self.beta1 * (1 - 0.5 * 0.96 ** (self._t * self.momentum_decay))
         mu_t1 = self.beta1 * (1 - 0.5 * 0.96 ** ((self._t + 1) * self.momentum_decay))
+        mu_product_before = self._mu_product
         self._mu_product *= mu_t
+        mu_product_next = self._mu_product * mu_t1
 
         with no_grad():
             for i, p in enumerate(self.parameters):
                 if p.grad is None:
                     continue
                 grad = p.grad
-                if self.weight_decay != 0:
-                    grad = grad + p * self.weight_decay
+                if not grad.is_contiguous():
+                    grad = grad.contiguous()
+                use_fused = p.dtype == "float32" and grad.dtype == "float32" and p.is_contiguous()
                 if self._m[i] is None:
                     self._m[i] = grad * 0.0
                     self._v[i] = grad * 0.0
-                self._m[i] = self._m[i] * self.beta1 + grad * (1 - self.beta1)
-                self._v[i] = self._v[i] * self.beta2 + (grad * grad) * (1 - self.beta2)
-
-                mu_product_next = self._mu_product * mu_t1
-                m_hat = (mu_t1 * self._m[i]) / (1 - mu_product_next) + \
-                        ((1 - mu_t) * grad) / (1 - self._mu_product)
-                v_hat = self._v[i] / (1 - self.beta2 ** self._t)
-                p.copy_(p - (m_hat / (v_hat.sqrt() + self.eps)) * self.lr)
+                if use_fused:
+                    aakaar._C._nadam_step_fused(
+                        p, grad, self._m[i], self._v[i],
+                        self.lr, self.beta1, self.beta2, self.eps, self.weight_decay,
+                        mu_t, mu_t1, mu_product_before, mu_product_next, self._t,
+                    )
+                else:
+                    if self.weight_decay != 0:
+                        grad = grad + p * self.weight_decay
+                    self._m[i] = self._m[i] * self.beta1 + grad * (1 - self.beta1)
+                    self._v[i] = self._v[i] * self.beta2 + (grad * grad) * (1 - self.beta2)
+                    m_hat = (mu_t1 * self._m[i]) / (1 - mu_product_next) + \
+                            ((1 - mu_t) * grad) / (1 - mu_product_before)
+                    v_hat = self._v[i] / (1 - self.beta2 ** self._t)
+                    p.copy_(p - (m_hat / (v_hat.sqrt() + self.eps)) * self.lr)
 
     def zero_grad(self):
         for p in self.parameters:
@@ -195,10 +234,6 @@ class NAdam:
 
 
 class RAdam:
-    """Rectified Adam (Liu et al., 2019) — disables the adaptive learning
-    rate term early in training (when its variance is high/undefined) and
-    falls back to plain SGD-with-momentum until the variance estimate
-    stabilizes, then switches to the Adam-style update."""
     def __init__(self, parameters, lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0):
         self.parameters = list(parameters)
         self.lr = lr
@@ -213,28 +248,40 @@ class RAdam:
     def step(self):
         self._t += 1
         rho_t = self._rho_inf - 2 * self._t * (self.beta2 ** self._t) / (1 - self.beta2 ** self._t)
+        use_adaptive = rho_t > 4
+        r_t = 0.0
+        if use_adaptive:
+            r_t = (((rho_t - 4) * (rho_t - 2) * self._rho_inf) /
+                   ((self._rho_inf - 4) * (self._rho_inf - 2) * rho_t)) ** 0.5
 
         with no_grad():
             for i, p in enumerate(self.parameters):
                 if p.grad is None:
                     continue
                 grad = p.grad
-                if self.weight_decay != 0:
-                    grad = grad + p * self.weight_decay
+                if not grad.is_contiguous():
+                    grad = grad.contiguous()
+                use_fused = p.dtype == "float32" and grad.dtype == "float32" and p.is_contiguous()
                 if self._m[i] is None:
                     self._m[i] = grad * 0.0
                     self._v[i] = grad * 0.0
-                self._m[i] = self._m[i] * self.beta1 + grad * (1 - self.beta1)
-                self._v[i] = self._v[i] * self.beta2 + (grad * grad) * (1 - self.beta2)
-                m_hat = self._m[i] / (1 - self.beta1 ** self._t)
-
-                if rho_t > 4:
-                    v_hat = self._v[i] / (1 - self.beta2 ** self._t)
-                    r_t = (((rho_t - 4) * (rho_t - 2) * self._rho_inf) /
-                           ((self._rho_inf - 4) * (self._rho_inf - 2) * rho_t)) ** 0.5
-                    p.copy_(p - (r_t * m_hat / (v_hat.sqrt() + self.eps)) * self.lr)
+                if use_fused:
+                    aakaar._C._radam_step_fused(
+                        p, grad, self._m[i], self._v[i],
+                        self.lr, self.beta1, self.beta2, self.eps, self.weight_decay,
+                        int(use_adaptive), r_t, self._t,
+                    )
                 else:
-                    p.copy_(p - m_hat * self.lr)
+                    if self.weight_decay != 0:
+                        grad = grad + p * self.weight_decay
+                    self._m[i] = self._m[i] * self.beta1 + grad * (1 - self.beta1)
+                    self._v[i] = self._v[i] * self.beta2 + (grad * grad) * (1 - self.beta2)
+                    m_hat = self._m[i] / (1 - self.beta1 ** self._t)
+                    if use_adaptive:
+                        v_hat = self._v[i] / (1 - self.beta2 ** self._t)
+                        p.copy_(p - (r_t * m_hat / (v_hat.sqrt() + self.eps)) * self.lr)
+                    else:
+                        p.copy_(p - m_hat * self.lr)
 
     def zero_grad(self):
         for p in self.parameters:
@@ -258,19 +305,41 @@ class RMSprop:
                 if p.grad is None:
                     continue
                 grad = p.grad
-                if self.weight_decay != 0:
-                    grad = grad + p * self.weight_decay
+                if not grad.is_contiguous():
+                    grad = grad.contiguous()
+                use_fused = p.dtype == "float32" and grad.dtype == "float32" and p.is_contiguous()
                 if self._sq_avg[i] is None:
                     self._sq_avg[i] = grad * 0.0
-                self._sq_avg[i] = self._sq_avg[i] * self.alpha + (grad * grad) * (1 - self.alpha)
-                update = grad / (self._sq_avg[i].sqrt() + self.eps)
-                if self.momentum > 0:
-                    if self._buf[i] is None:
-                        self._buf[i] = update
-                    else:
-                        self._buf[i] = self._buf[i] * self.momentum + update
-                    update = self._buf[i]
-                p.copy_(p - update * self.lr)
+                if self._buf[i] is None:
+                    self._buf[i] = grad * 0.0
+
+                if use_fused:
+                    initialized = self._buf[i] is not None and self._sq_avg[i].sum().item() != 0.0 or True
+                    # buf_initialized must track "has a momentum update ever been written",
+                    # not "does the tensor exist" (it always exists once allocated above).
+                    buf_was_used = getattr(self, "_buf_used", None)
+                    if buf_was_used is None:
+                        buf_was_used = [False] * len(self.parameters)
+                        self._buf_used = buf_was_used
+                    aakaar._C._rmsprop_step_fused(
+                        p, grad, self._sq_avg[i], self._buf[i],
+                        self.lr, self.alpha, self.eps, self.weight_decay, self.momentum,
+                        int(self.momentum > 0), int(self._buf_used[i]),
+                    )
+                    if self.momentum > 0:
+                        self._buf_used[i] = True
+                else:
+                    if self.weight_decay != 0:
+                        grad = grad + p * self.weight_decay
+                    self._sq_avg[i] = self._sq_avg[i] * self.alpha + (grad * grad) * (1 - self.alpha)
+                    update = grad / (self._sq_avg[i].sqrt() + self.eps)
+                    if self.momentum > 0:
+                        if self._buf[i] is None:
+                            self._buf[i] = update
+                        else:
+                            self._buf[i] = self._buf[i] * self.momentum + update
+                        update = self._buf[i]
+                    p.copy_(p - update * self.lr)
 
     def zero_grad(self):
         for p in self.parameters:
@@ -304,10 +373,6 @@ class Adagrad:
 
 
 class Adadelta:
-    """No global learning rate needed by design (the update itself carries
-    units of the parameter, via the ratio of accumulated update RMS to
-    accumulated gradient RMS) — lr here is default of 1.0,
-    kept as a scaling knob rather than removed."""
     def __init__(self, parameters, lr=1.0, rho=0.9, eps=1e-6, weight_decay=0.0):
         self.parameters = list(parameters)
         self.lr = lr
@@ -323,15 +388,25 @@ class Adadelta:
                 if p.grad is None:
                     continue
                 grad = p.grad
-                if self.weight_decay != 0:
-                    grad = grad + p * self.weight_decay
+                if not grad.is_contiguous():
+                    grad = grad.contiguous()
+                use_fused = p.dtype == "float32" and grad.dtype == "float32" and p.is_contiguous()
                 if self._sq_avg[i] is None:
                     self._sq_avg[i] = grad * 0.0
                     self._acc_delta[i] = grad * 0.0
-                self._sq_avg[i] = self._sq_avg[i] * self.rho + (grad * grad) * (1 - self.rho)
-                delta = (self._acc_delta[i] + self.eps).sqrt() / (self._sq_avg[i] + self.eps).sqrt() * grad
-                self._acc_delta[i] = self._acc_delta[i] * self.rho + (delta * delta) * (1 - self.rho)
-                p.copy_(p - delta * self.lr)
+
+                if use_fused:
+                    aakaar._C._adadelta_step_fused(
+                        p, grad, self._sq_avg[i], self._acc_delta[i],
+                        self.lr, self.rho, self.eps, self.weight_decay,
+                    )
+                else:
+                    if self.weight_decay != 0:
+                        grad = grad + p * self.weight_decay
+                    self._sq_avg[i] = self._sq_avg[i] * self.rho + (grad * grad) * (1 - self.rho)
+                    delta = (self._acc_delta[i] + self.eps).sqrt() / (self._sq_avg[i] + self.eps).sqrt() * grad
+                    self._acc_delta[i] = self._acc_delta[i] * self.rho + (delta * delta) * (1 - self.rho)
+                    p.copy_(p - delta * self.lr)
 
     def zero_grad(self):
         for p in self.parameters:
@@ -393,10 +468,6 @@ class Rprop:
 
     @staticmethod
     def _clip(t, lo, hi):
-        # min(max(t, lo), hi), built from relu identities (no elementwise
-        # clamp/min/max-with-scalar primitive exists yet):
-        #   max(t, lo) = lo + relu(t - lo)
-        #   min(x, hi) = hi - relu(hi - x)
         raised = lo + (t - lo).relu()
         return hi - (hi - raised).relu()
 
@@ -406,25 +477,37 @@ class Rprop:
                 if p.grad is None:
                     continue
                 grad = p.grad
+                if not grad.is_contiguous():
+                    grad = grad.contiguous()
+                use_fused = p.dtype == "float32" and grad.dtype == "float32" and p.is_contiguous()
+                first_step = self._prev_grad[i] is None
 
-                if self._prev_grad[i] is None:
-                    step_size = grad * 0.0 + self.lr
+                if use_fused:
+                    if self._prev_grad[i] is None:
+                        self._prev_grad[i] = grad * 0.0
+                        self._step_size[i] = grad * 0.0
+                    aakaar._C._rprop_step_fused(
+                        p, grad, self._prev_grad[i], self._step_size[i],
+                        self.lr, self.eta_minus, self.eta_plus, self.step_min, self.step_max,
+                        int(first_step),
+                    )
                 else:
-                    sign_agree = (grad * self._prev_grad[i]).sign()  # in {-1, 0, 1}
-                    pos_mask = sign_agree.relu()          # 1 where sign_agree == 1
-                    neg_mask = (-sign_agree).relu()       # 1 where sign_agree == -1
-                    same_mask = 1 - pos_mask - neg_mask   # 1 where sign_agree == 0
-
-                    step_size = self._step_size[i] * (pos_mask * self.eta_plus +
-                                                       neg_mask * self.eta_minus +
-                                                       same_mask * 1.0)
-                    step_size = self._clip(step_size, self.step_min, self.step_max)
-                    grad = grad * (1 - neg_mask)  # zero grad where sign flipped (torch's convention)
-
-                self._step_size[i] = step_size
-                self._prev_grad[i] = grad
-                update = grad.sign() * step_size
-                p.copy_(p - update)
+                    if first_step:
+                        step_size = grad * 0.0 + self.lr
+                    else:
+                        sign_agree = (grad * self._prev_grad[i]).sign()
+                        pos_mask = sign_agree.relu()
+                        neg_mask = (-sign_agree).relu()
+                        same_mask = 1 - pos_mask - neg_mask
+                        step_size = self._step_size[i] * (pos_mask * self.eta_plus +
+                                                           neg_mask * self.eta_minus +
+                                                           same_mask * 1.0)
+                        step_size = self._clip(step_size, self.step_min, self.step_max)
+                        grad = grad * (1 - neg_mask)
+                    self._step_size[i] = step_size
+                    self._prev_grad[i] = grad
+                    update = grad.sign() * step_size
+                    p.copy_(p - update)
 
     def zero_grad(self):
         for p in self.parameters:

@@ -89,9 +89,54 @@ std::shared_ptr<Tensor> run_cpu_nll_per_row(std::shared_ptr<Tensor> log_probs, s
 std::shared_ptr<Tensor> run_cpu_nll_backward(std::shared_ptr<Tensor> onehot, float grad_scale);
 std::pair<float, int> run_cpu_bce_logits_forward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> target);
 std::shared_ptr<Tensor> run_cpu_bce_logits_backward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> target, float grad_scale);
+std::shared_ptr<Tensor> run_cpu_matmul_a_bt(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>);
+std::shared_ptr<Tensor> run_cpu_matmul_at_b(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>);
+void run_cpu_im2col_2d(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> col,
+                        int KH, int KW, int SH, int SW, int PH, int PW, int DH, int DW, int OH, int OW);
+void run_cpu_col2im_2d(std::shared_ptr<Tensor> grad_col, std::shared_ptr<Tensor> grad_x,
+                        int B, int C, int H, int W, int KH, int KW, int SH, int SW,
+                        int PH, int PW, int DH, int DW, int OH, int OW);
+void run_cpu_im2col_2d_typed(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> col,
+                              int KH, int KW, int SH, int SW, int PH, int PW, int DH, int DW, int OH, int OW);
+void run_cpu_adam_step(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad,
+                        std::shared_ptr<Tensor> m, std::shared_ptr<Tensor> v,
+                        float lr, float beta1, float beta2, float eps,
+                        float weight_decay, int t);
+void run_cpu_sgd_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                       float, float, float, float, int, int, int);
+void run_cpu_adamw_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                         float, float, float, float, float, int);
+void run_cpu_adamax_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                          float, float, float, float, float, int);
+void run_cpu_nadam_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                         float, float, float, float, float, float, float, float, float, int);
+void run_cpu_radam_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                         float, float, float, float, float, int, float, int);
+void run_cpu_rmsprop_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                           float, float, float, float, float, int, int);
+void run_cpu_adadelta_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                            float, float, float, float);
+void run_cpu_rprop_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                         float, float, float, float, float, int);
+void run_cpu_add_channel_bias(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> bias,
+                               std::shared_ptr<Tensor> out, int C, int HW, int total);
+void run_cpu_channel_bias_grad(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, int, int);  
+void run_cpu_im2col_3d(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> col,
+                        int KD, int KH, int KW, int SD, int SH, int SW,
+                        int PD, int PH, int PW, int DD, int DH, int DW,
+                        int OD, int OH, int OW);
+void run_cpu_col2im_3d(std::shared_ptr<Tensor> grad_col, std::shared_ptr<Tensor> grad_x,
+                        int B, int C, int D, int H, int W,
+                        int KD, int KH, int KW, int SD, int SH, int SW,
+                        int PD, int PH, int PW, int DD, int DH, int DW,
+                        int OD, int OH, int OW);                             
+void run_cpu_channel_bias_grad_nd(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, int, int, int);
 
 #ifndef AAKAAR_NO_CUDA
 #include "allocator.h"
+#include "cuda_graph.h"
+#include "cudnn_manager.h"
+#include "pinned_allocator.h"
 void run_curand_uniform(std::shared_ptr<Tensor> t, unsigned long long seed);
 void run_curand_randint(std::shared_ptr<Tensor> t, long long low, long long high, unsigned long long seed);
 void cuda_synchronize();
@@ -159,6 +204,42 @@ std::shared_ptr<Tensor> run_cudnn_conv1d_backward_data(std::shared_ptr<Tensor> g
 std::shared_ptr<Tensor> run_cudnn_conv1d_backward_filter(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> grad_y,
                                                            int C_out, int K, int stride, int padding,
                                                            int dilation, int L_out);
+void run_cudnn_conv1d_forward_into(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w, std::shared_ptr<Tensor> y,
+                                    int stride, int padding, int dilation);
+void run_cudnn_conv1d_backward_data_into(std::shared_ptr<Tensor> grad_y, std::shared_ptr<Tensor> w,
+                                          std::shared_ptr<Tensor> grad_x, int stride, int padding, int dilation);
+void run_cudnn_conv1d_backward_filter_into(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> grad_y,
+                                            std::shared_ptr<Tensor> grad_w, int stride, int padding, int dilation);
+void cudnn_set_stream_for_capture(std::shared_ptr<GraphHandle> handle);
+std::shared_ptr<Tensor> run_cudnn_conv2d_forward(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
+                                                   int SH, int SW, int PH, int PW, int DH, int DW,
+                                                   int OH, int OW);
+std::shared_ptr<Tensor> run_cudnn_conv2d_backward_data(std::shared_ptr<Tensor> grad_y, std::shared_ptr<Tensor> w,
+                                                         int B, int C_in, int H, int W, int SH, int SW,
+                                                         int PH, int PW, int DH, int DW, int OH, int OW,
+                                                         bool require_capturable);
+std::shared_ptr<Tensor> run_cudnn_conv2d_backward_filter(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> grad_y,
+                                                           int C_out, int KH, int KW, int SH, int SW,
+                                                           int PH, int PW, int DH, int DW, int OH, int OW,
+                                                           bool require_capturable);
+std::shared_ptr<Tensor> run_cudnn_conv3d_forward(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
+                                                  int SD, int SH, int SW, int PD, int PH, int PW,
+                                                  int DD, int DH, int DW, int OD, int OH, int OW);
+std::shared_ptr<Tensor> run_cudnn_conv3d_backward_data(std::shared_ptr<Tensor> grad_y, std::shared_ptr<Tensor> w,
+                                                        int B, int Cin, int D, int H, int W,
+                                                        int SD, int SH, int SW, int PD, int PH, int PW,
+                                                        int DD, int DH, int DW, int OD, int OH, int OW);
+std::shared_ptr<Tensor> run_cudnn_conv3d_backward_filter(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> grad_y,
+                                                          int Cout, int KD, int KH, int KW,
+                                                          int SD, int SH, int SW, int PD, int PH, int PW,
+                                                          int DD, int DH, int DW, int OD, int OH, int OW);                                                           
+void run_cudnn_conv2d_forward_into(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w, std::shared_ptr<Tensor> y,
+                                    int SH, int SW, int PH, int PW, int DH, int DW);                                    
+void run_cudnn_conv2d_backward_data_into(std::shared_ptr<Tensor> grad_y, std::shared_ptr<Tensor> w,
+                                          std::shared_ptr<Tensor> grad_x, int SH, int SW, int PH, int PW, int DH, int DW);
+void run_cudnn_conv2d_backward_filter_into(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> grad_y,
+                                            std::shared_ptr<Tensor> grad_w, int SH, int SW, int PH, int PW, int DH, int DW);
+void cudnn_reset_stream();
 #endif
 std::pair<float, std::shared_ptr<Tensor>> run_cuda_huber_loss_forward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta);
 std::shared_ptr<Tensor> run_cuda_huber_loss_backward(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta, float grad_scale);
@@ -176,6 +257,48 @@ std::shared_ptr<Tensor> run_cuda_nll_per_row(std::shared_ptr<Tensor> log_probs, 
 std::shared_ptr<Tensor> run_cuda_nll_backward(std::shared_ptr<Tensor> onehot, float grad_scale);
 std::pair<float, int> run_cuda_bce_logits_forward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> target);
 std::shared_ptr<Tensor> run_cuda_bce_logits_backward(std::shared_ptr<Tensor> logits, std::shared_ptr<Tensor> target, float grad_scale);
+std::shared_ptr<Tensor> run_cublas_matmul_a_bt(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>);
+std::shared_ptr<Tensor> run_cublas_matmul_at_b(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>);
+void run_cuda_im2col_2d(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> col,
+                         int KH, int KW, int SH, int SW, int PH, int PW, int DH, int DW, int OH, int OW);
+void run_cuda_col2im_2d(std::shared_ptr<Tensor> grad_col, std::shared_ptr<Tensor> grad_x,
+                         int B, int C, int H, int W, int KH, int KW, int SH, int SW,
+                         int PH, int PW, int DH, int DW, int OH, int OW);
+void run_cuda_im2col_2d_typed(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> col,
+                               int KH, int KW, int SH, int SW, int PH, int PW, int DH, int DW, int OH, int OW);
+void run_cuda_adam_step(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad,
+                         std::shared_ptr<Tensor> m, std::shared_ptr<Tensor> v,
+                         float lr, float beta1, float beta2, float eps,
+                         float weight_decay, int t);
+void run_cuda_sgd_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                        float, float, float, float, int, int, int);
+void run_cuda_adamw_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                          float, float, float, float, float, int);
+void run_cuda_adamax_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                           float, float, float, float, float, int);
+void run_cuda_nadam_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                          float, float, float, float, float, float, float, float, float, int);
+void run_cuda_radam_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                          float, float, float, float, float, int, float, int);
+void run_cuda_rmsprop_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                            float, float, float, float, float, int, int);
+void run_cuda_adadelta_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                             float, float, float, float);
+void run_cuda_rprop_step(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, std::shared_ptr<Tensor>,
+                          float, float, float, float, float, int);
+void run_cuda_add_channel_bias(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> bias,
+                                std::shared_ptr<Tensor> out, int C, int HW, int total);
+void run_cuda_channel_bias_grad(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, int, int); 
+void run_cuda_im2col_3d(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> col,
+                         int KD, int KH, int KW, int SD, int SH, int SW,
+                         int PD, int PH, int PW, int DD, int DH, int DW,
+                         int OD, int OH, int OW);
+void run_cuda_col2im_3d(std::shared_ptr<Tensor> grad_col, std::shared_ptr<Tensor> grad_x,
+                         int B, int C, int D, int H, int W,
+                         int KD, int KH, int KW, int SD, int SH, int SW,
+                         int PD, int PH, int PW, int DD, int DH, int DW,
+                         int OD, int OH, int OW);                      
+void run_cuda_channel_bias_grad_nd(std::shared_ptr<Tensor>, std::shared_ptr<Tensor>, int, int, int);                                                                  
 void empty_cache() { CachingAllocator::get_instance().empty_cache(); }
 #endif
 
@@ -193,6 +316,18 @@ static std::shared_ptr<Tensor> dispatch_sum_axis(std::shared_ptr<Tensor> a, int 
 static std::shared_ptr<Tensor> dispatch_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size);
 static std::shared_ptr<Tensor> dispatch_contiguous(std::shared_ptr<Tensor> a);
 static std::shared_ptr<Tensor> dispatch_huber_loss(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta);
+
+static bool is_channel_bias_shape(const std::vector<int>& b_shape, const std::vector<int>& a_shape, int& C, int& HW) {
+    // Matches (1, C, 1, 1) against (B, C, H, W), or (1, C, 1) against (B, C, L).
+    if (b_shape.size() != a_shape.size()) return false;
+    if (b_shape.size() < 3) return false;
+    if (b_shape[0] != 1 || b_shape[1] != a_shape[1]) return false;
+    for (size_t i = 2; i < b_shape.size(); ++i) if (b_shape[i] != 1) return false;
+    C = a_shape[1];
+    HW = 1;
+    for (size_t i = 2; i < a_shape.size(); ++i) HW *= a_shape[i];
+    return true;
+}
 
 // Add near your other includes/declarations
 int cuda_device_count() {
@@ -901,6 +1036,61 @@ static std::shared_ptr<Tensor> dispatch_im2col_1d(std::shared_ptr<Tensor> x, int
     return result;
 }
 
+static std::shared_ptr<Tensor> dispatch_im2col_2d(std::shared_ptr<Tensor> x, int KH, int KW, int SH, int SW,
+                                                    int PH, int PW, int DH, int DW, int OH, int OW) {
+    if (x->shape.size() != 4)
+        throw std::invalid_argument("im2col_2d: expected input of shape (batch, channels, H, W), got rank " +
+                                     std::to_string(x->shape.size()));
+    if (!x->is_contiguous()) x = dispatch_contiguous(x);
+
+    int B = x->shape[0], C = x->shape[1];
+    std::vector<int> col_shape = {B, C * KH * KW, OH * OW};
+
+    if (x->dtype != DType::FLOAT32) {
+        if (g_grad_enabled && x->requires_grad)
+            throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(x->dtype) +
+                                      "'. Only float32 currently supports gradients.");
+        auto result = std::make_shared<Tensor>(col_shape, x->device, x->dtype);
+#ifndef AAKAAR_NO_CUDA
+        if (x->device == "cuda") {
+            run_cuda_im2col_2d_typed(x, result, KH, KW, SH, SW, PH, PW, DH, DW, OH, OW);
+            return result;
+        }
+#endif
+        run_cpu_im2col_2d_typed(x, result, KH, KW, SH, SW, PH, PW, DH, DW, OH, OW);
+        return result;
+    }
+
+    auto result = std::make_shared<Tensor>(col_shape, x->device);
+#ifndef AAKAAR_NO_CUDA
+    if (x->device == "cuda") run_cuda_im2col_2d(x, result, KH, KW, SH, SW, PH, PW, DH, DW, OH, OW);
+    else
+#endif
+    run_cpu_im2col_2d(x, result, KH, KW, SH, SW, PH, PW, DH, DW, OH, OW);
+
+    if (g_grad_enabled && x->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {x};
+        node->op_name = "im2col_2d";
+        int B_c = B, C_c = C, H_c = x->shape[2], W_c = x->shape[3];
+        int KH_c = KH, KW_c = KW, SH_c = SH, SW_c = SW, PH_c = PH, PW_c = PW, DH_c = DH, DW_c = DW, OH_c = OH, OW_c = OW;
+        auto dev = x->device;
+        node->backward_fn = [B_c, C_c, H_c, W_c, KH_c, KW_c, SH_c, SW_c, PH_c, PW_c, DH_c, DW_c, OH_c, OW_c, dev]
+                             (std::shared_ptr<Tensor> grad_out) {
+            auto grad_x = std::make_shared<Tensor>(std::vector<int>{B_c, C_c, H_c, W_c}, dev);
+#ifndef AAKAAR_NO_CUDA
+            if (dev == "cuda") run_cuda_col2im_2d(grad_out, grad_x, B_c, C_c, H_c, W_c, KH_c, KW_c, SH_c, SW_c, PH_c, PW_c, DH_c, DW_c, OH_c, OW_c);
+            else
+#endif
+            run_cpu_col2im_2d(grad_out, grad_x, B_c, C_c, H_c, W_c, KH_c, KW_c, SH_c, SW_c, PH_c, PW_c, DH_c, DW_c, OH_c, OW_c);
+            return std::vector<std::shared_ptr<Tensor>>{grad_x};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
 #ifdef AAKAAR_HAS_CUDNN
 static std::shared_ptr<Tensor> dispatch_conv1d_cudnn(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
                                                        int stride, int padding, int dilation) {
@@ -938,6 +1128,81 @@ static std::shared_ptr<Tensor> dispatch_conv1d_cudnn(std::shared_ptr<Tensor> x, 
     }
     return y;
 }
+
+static std::shared_ptr<Tensor> dispatch_conv2d_cudnn(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
+                                                       int SH, int SW, int PH, int PW, int DH, int DW) {
+    if (x->device != "cuda" || w->device != "cuda")
+        throw std::runtime_error("conv2d_cudnn: both input and weight must be on device='cuda'.");
+    if (x->dtype != DType::FLOAT32 || w->dtype != DType::FLOAT32)
+        throw std::runtime_error("conv2d_cudnn: only float32 is supported. Use conv2d_im2col (matmul-based) instead.");
+    if (!x->is_contiguous()) x = dispatch_contiguous(x);
+    if (!w->is_contiguous()) w = dispatch_contiguous(w);
+
+    int B = x->shape[0], C_in = x->shape[1], H = x->shape[2], W = x->shape[3];
+    int C_out = w->shape[0], KH = w->shape[2], KW = w->shape[3];
+    int OH = (H + 2 * PH - DH * (KH - 1) - 1) / SH + 1;
+    int OW = (W + 2 * PW - DW * (KW - 1) - 1) / SW + 1;
+    if (OH <= 0 || OW <= 0)
+        throw std::invalid_argument("conv2d_cudnn: computed output size <= 0.");
+
+    auto y = run_cudnn_conv2d_forward(x, w, SH, SW, PH, PW, DH, DW, OH, OW);
+
+    if (g_grad_enabled && (x->requires_grad || w->requires_grad)) {
+        y->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {x, w};
+        node->op_name = "conv2d_cudnn";
+        int B_c=B, Cin_c=C_in, H_c=H, W_c=W, Cout_c=C_out, KH_c=KH, KW_c=KW,
+            SH_c=SH, SW_c=SW, PH_c=PH, PW_c=PW, DH_c=DH, DW_c=DW, OH_c=OH, OW_c=OW;
+        node->backward_fn = [x, w, B_c, Cin_c, H_c, W_c, Cout_c, KH_c, KW_c, SH_c, SW_c, PH_c, PW_c, DH_c, DW_c, OH_c, OW_c]
+                             (std::shared_ptr<Tensor> grad_out) {
+            auto grad_x = run_cudnn_conv2d_backward_data(grad_out, w, B_c, Cin_c, H_c, W_c, SH_c, SW_c, PH_c, PW_c, DH_c, DW_c, OH_c, OW_c, /*require_capturable=*/false);
+            auto grad_w = run_cudnn_conv2d_backward_filter(x, grad_out, Cout_c, KH_c, KW_c, SH_c, SW_c, PH_c, PW_c, DH_c, DW_c, OH_c, OW_c, /*require_capturable=*/false);
+            return std::vector<std::shared_ptr<Tensor>>{grad_x, grad_w};
+        };
+        y->grad_fn = node;
+    }
+    return y;
+}
+
+static std::shared_ptr<Tensor> dispatch_conv3d_cudnn(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
+                                                       int SD, int SH, int SW, int PD, int PH, int PW,
+                                                       int DD, int DH, int DW) {
+    if (x->device != "cuda" || w->device != "cuda")
+        throw std::runtime_error("conv3d_cudnn: both input and weight must be on device='cuda'.");
+    if (x->dtype != DType::FLOAT32 || w->dtype != DType::FLOAT32)
+        throw std::runtime_error("conv3d_cudnn: only float32 is supported. Use conv3d_im2col (matmul-based) instead.");
+    if (!x->is_contiguous()) x = dispatch_contiguous(x);
+    if (!w->is_contiguous()) w = dispatch_contiguous(w);
+
+    int B = x->shape[0], Cin = x->shape[1], D = x->shape[2], H = x->shape[3], W = x->shape[4];
+    int Cout = w->shape[0], KD = w->shape[2], KH = w->shape[3], KW = w->shape[4];
+    int OD = (D + 2*PD - DD*(KD-1) - 1) / SD + 1;
+    int OH = (H + 2*PH - DH*(KH-1) - 1) / SH + 1;
+    int OW = (W + 2*PW - DW*(KW-1) - 1) / SW + 1;
+    if (OD <= 0 || OH <= 0 || OW <= 0)
+        throw std::invalid_argument("conv3d_cudnn: computed output size <= 0.");
+
+    auto y = run_cudnn_conv3d_forward(x, w, SD, SH, SW, PD, PH, PW, DD, DH, DW, OD, OH, OW);
+
+    if (g_grad_enabled && (x->requires_grad || w->requires_grad)) {
+        y->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {x, w};
+        node->op_name = "conv3d_cudnn";
+        int B_c=B,Cin_c=Cin,D_c=D,H_c=H,W_c=W,Cout_c=Cout,KD_c=KD,KH_c=KH,KW_c=KW,
+            SD_c=SD,SH_c=SH,SW_c=SW,PD_c=PD,PH_c=PH,PW_c=PW,DD_c=DD,DH_c=DH,DW_c=DW,OD_c=OD,OH_c=OH,OW_c=OW;
+        node->backward_fn = [x, w, B_c,Cin_c,D_c,H_c,W_c,Cout_c,KD_c,KH_c,KW_c,SD_c,SH_c,SW_c,PD_c,PH_c,PW_c,DD_c,DH_c,DW_c,OD_c,OH_c,OW_c]
+                             (std::shared_ptr<Tensor> grad_out) {
+            auto grad_x = run_cudnn_conv3d_backward_data(grad_out, w, B_c,Cin_c,D_c,H_c,W_c,SD_c,SH_c,SW_c,PD_c,PH_c,PW_c,DD_c,DH_c,DW_c,OD_c,OH_c,OW_c);
+            auto grad_w = run_cudnn_conv3d_backward_filter(x, grad_out, Cout_c,KD_c,KH_c,KW_c,SD_c,SH_c,SW_c,PD_c,PH_c,PW_c,DD_c,DH_c,DW_c,OD_c,OH_c,OW_c);
+            return std::vector<std::shared_ptr<Tensor>>{grad_x, grad_w};
+        };
+        y->grad_fn = node;
+    }
+    return y;
+}
+
 #endif  // AAKAAR_HAS_CUDNN
 
 
@@ -989,6 +1254,43 @@ static std::shared_ptr<Tensor> reduce_grad_to_shape(std::shared_ptr<Tensor> grad
 }
 
 static std::shared_ptr<Tensor> dispatch_add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    int C, HW;
+    if (a->dtype == DType::FLOAT32 && b->dtype == DType::FLOAT32 &&
+        a->is_contiguous() && b->is_contiguous() &&
+        is_channel_bias_shape(b->shape, a->shape, C, HW)) {
+        auto result = std::make_shared<Tensor>(a->shape, a->device);
+        int total = a->size;
+#ifndef AAKAAR_NO_CUDA
+        if (a->device == "cuda") run_cuda_add_channel_bias(a, b, result, C, HW, total);
+        else
+#endif
+        run_cpu_add_channel_bias(a, b, result, C, HW, total);
+
+        if (g_grad_enabled && (a->requires_grad || b->requires_grad)) {
+            result->requires_grad = true;
+            auto node = std::make_shared<Node>();
+            node->inputs = {a, b};
+            node->op_name = "add_channel_bias";
+            auto a_shape = a->shape;
+            auto b_shape = b->shape;
+            
+            // Updated backward_fn for fast-path channel bias gradient
+            node->backward_fn = [a_shape, b_shape, C, HW](std::shared_ptr<Tensor> grad_out) {
+                auto da = reduce_grad_to_shape(grad_out, a_shape);  // no-op: shapes already match
+                auto db = std::make_shared<Tensor>(b_shape, grad_out->device);
+                int B = a_shape[0];
+#ifndef AAKAAR_NO_CUDA
+                if (grad_out->device == "cuda") run_cuda_channel_bias_grad_nd(grad_out, db, B, C, HW);
+                else
+#endif
+                run_cpu_channel_bias_grad_nd(grad_out, db, B, C, HW);
+                return std::vector<std::shared_ptr<Tensor>>{da, db};
+            };
+            
+            result->grad_fn = node;
+        }
+        return result;
+    }
     if (a->dtype != DType::FLOAT32) {
         if (g_grad_enabled && (a->requires_grad || b->requires_grad))
             throw std::runtime_error("Autograd is not yet supported for dtype '" + dtype_name(a->dtype) +
@@ -1173,21 +1475,37 @@ static std::shared_ptr<Tensor> dispatch_matmul(std::shared_ptr<Tensor> a, std::s
         node->inputs = {a, b};
         node->op_name = "matmul";
         node->backward_fn = [a, b](std::shared_ptr<Tensor> grad_out) {
+            // Fast path: both operands genuinely 2D (the common case — Linear
+            // layers). Skips the transpose+contiguous materialization entirely,
+            // passing cuBLAS/BLAS transpose flags against the original memory
+            // instead. Batched (>2D) matmul falls back to the general path below,
+            // since the transpose-flag trick doesn't extend cleanly to a batched
+            // dimension without per-batch striding cuBLAS doesn't expose simply.
+            bool is_2d = a->shape.size() == 2 && b->shape.size() == 2 && grad_out->shape.size() == 2;
+            if (is_2d && a->dtype == DType::FLOAT32) {
+                std::shared_ptr<Tensor> da, db;
+        #ifndef AAKAAR_NO_CUDA
+                if (a->device == "cuda") {
+                    da = run_cublas_matmul_a_bt(grad_out, b);
+                    db = run_cublas_matmul_at_b(a, grad_out);
+                } else
+        #endif
+                {
+                    da = run_cpu_matmul_a_bt(grad_out, b);
+                    db = run_cpu_matmul_at_b(a, grad_out);
+                }
+                return std::vector<std::shared_ptr<Tensor>>{da, db};
+            }
+
+            // General N-D fallback (unchanged)
             int nd_a = (int)a->shape.size();
             int nd_b = (int)b->shape.size();
-
             auto bT = b->transpose(nd_b-2, nd_b-1)->contiguous();
             auto aT = a->transpose(nd_a-2, nd_a-1)->contiguous();
-
             auto da_full = dispatch_matmul(grad_out, bT);
             auto db_full = dispatch_matmul(aT, grad_out);
-
-            // skip_trailing=2: the last two dims are the actual M/K and K/N
-            // matmul dims, never broadcast targets — only batch dims (0..ndim-2)
-            // can differ due to broadcasting.
             auto da = reduce_grad_to_shape(da_full, a->shape, 2);
             auto db = reduce_grad_to_shape(db_full, b->shape, 2);
-
             return std::vector<std::shared_ptr<Tensor>>{da, db};
         };
         result->grad_fn = node;
@@ -1697,6 +2015,138 @@ static std::shared_ptr<Tensor> dispatch_bce_logits_fused(std::shared_ptr<Tensor>
     return result;
 }
 
+static void dispatch_adam_step_fused(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad,
+                                      std::shared_ptr<Tensor> m, std::shared_ptr<Tensor> v,
+                                      float lr, float beta1, float beta2, float eps,
+                                      float weight_decay, int t) {
+    if (p->dtype != DType::FLOAT32 || grad->dtype != DType::FLOAT32 ||
+        m->dtype != DType::FLOAT32 || v->dtype != DType::FLOAT32)
+        throw std::runtime_error("adam_step_fused: only float32 is currently supported by the fused kernel. "
+                                  "Use the generic (unfused) optimizer path for other dtypes.");
+    if (p->device != grad->device || p->device != m->device || p->device != v->device)
+        throw std::runtime_error("adam_step_fused: p/grad/m/v must all be on the same device.");
+
+#ifndef AAKAAR_NO_CUDA
+    if (p->device == "cuda") {
+        run_cuda_adam_step(p, grad, m, v, lr, beta1, beta2, eps, weight_decay, t);
+        return;
+    }
+#endif
+    run_cpu_adam_step(p, grad, m, v, lr, beta1, beta2, eps, weight_decay, t);
+}
+
+static void dispatch_sgd_step_fused(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad, std::shared_ptr<Tensor> velocity,
+                                     float lr, float momentum, float weight_decay, float dampening,
+                                     int nesterov, int has_momentum, int velocity_initialized) {
+#ifndef AAKAAR_NO_CUDA
+    if (p->device == "cuda") { run_cuda_sgd_step(p, grad, velocity, lr, momentum, weight_decay, dampening, nesterov, has_momentum, velocity_initialized); return; }
+#endif
+    run_cpu_sgd_step(p, grad, velocity, lr, momentum, weight_decay, dampening, nesterov, has_momentum, velocity_initialized);
+}
+
+static void dispatch_adamw_step_fused(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad, std::shared_ptr<Tensor> m, std::shared_ptr<Tensor> v,
+                                       float lr, float beta1, float beta2, float eps, float weight_decay, int t) {
+#ifndef AAKAAR_NO_CUDA
+    if (p->device == "cuda") { run_cuda_adamw_step(p, grad, m, v, lr, beta1, beta2, eps, weight_decay, t); return; }
+#endif
+    run_cpu_adamw_step(p, grad, m, v, lr, beta1, beta2, eps, weight_decay, t);
+}
+
+static void dispatch_adamax_step_fused(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad, std::shared_ptr<Tensor> m, std::shared_ptr<Tensor> u,
+                                        float lr, float beta1, float beta2, float eps, float weight_decay, int t) {
+#ifndef AAKAAR_NO_CUDA
+    if (p->device == "cuda") { run_cuda_adamax_step(p, grad, m, u, lr, beta1, beta2, eps, weight_decay, t); return; }
+#endif
+    run_cpu_adamax_step(p, grad, m, u, lr, beta1, beta2, eps, weight_decay, t);
+}
+
+static void dispatch_nadam_step_fused(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad, std::shared_ptr<Tensor> m, std::shared_ptr<Tensor> v,
+                                       float lr, float beta1, float beta2, float eps, float weight_decay,
+                                       float mu_t, float mu_t1, float mu_product, float mu_product_next, int t) {
+#ifndef AAKAAR_NO_CUDA
+    if (p->device == "cuda") { run_cuda_nadam_step(p, grad, m, v, lr, beta1, beta2, eps, weight_decay, mu_t, mu_t1, mu_product, mu_product_next, t); return; }
+#endif
+    run_cpu_nadam_step(p, grad, m, v, lr, beta1, beta2, eps, weight_decay, mu_t, mu_t1, mu_product, mu_product_next, t);
+}
+
+static void dispatch_radam_step_fused(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad, std::shared_ptr<Tensor> m, std::shared_ptr<Tensor> v,
+                                       float lr, float beta1, float beta2, float eps, float weight_decay,
+                                       int use_adaptive, float r_t, int t) {
+#ifndef AAKAAR_NO_CUDA
+    if (p->device == "cuda") { run_cuda_radam_step(p, grad, m, v, lr, beta1, beta2, eps, weight_decay, use_adaptive, r_t, t); return; }
+#endif
+    run_cpu_radam_step(p, grad, m, v, lr, beta1, beta2, eps, weight_decay, use_adaptive, r_t, t);
+}
+
+static void dispatch_rmsprop_step_fused(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad, std::shared_ptr<Tensor> sq_avg, std::shared_ptr<Tensor> buf,
+                                         float lr, float alpha, float eps, float weight_decay, float momentum,
+                                         int has_momentum, int buf_initialized) {
+#ifndef AAKAAR_NO_CUDA
+    if (p->device == "cuda") { run_cuda_rmsprop_step(p, grad, sq_avg, buf, lr, alpha, eps, weight_decay, momentum, has_momentum, buf_initialized); return; }
+#endif
+    run_cpu_rmsprop_step(p, grad, sq_avg, buf, lr, alpha, eps, weight_decay, momentum, has_momentum, buf_initialized);
+}
+
+static void dispatch_adadelta_step_fused(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad, std::shared_ptr<Tensor> sq_avg, std::shared_ptr<Tensor> acc_delta,
+                                          float lr, float rho, float eps, float weight_decay) {
+#ifndef AAKAAR_NO_CUDA
+    if (p->device == "cuda") { run_cuda_adadelta_step(p, grad, sq_avg, acc_delta, lr, rho, eps, weight_decay); return; }
+#endif
+    run_cpu_adadelta_step(p, grad, sq_avg, acc_delta, lr, rho, eps, weight_decay);
+}
+
+static void dispatch_rprop_step_fused(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad, std::shared_ptr<Tensor> prev_grad, std::shared_ptr<Tensor> step_size,
+                                       float lr, float eta_minus, float eta_plus, float step_min, float step_max, int first_step) {
+#ifndef AAKAAR_NO_CUDA
+    if (p->device == "cuda") { run_cuda_rprop_step(p, grad, prev_grad, step_size, lr, eta_minus, eta_plus, step_min, step_max, first_step); return; }
+#endif
+    run_cpu_rprop_step(p, grad, prev_grad, step_size, lr, eta_minus, eta_plus, step_min, step_max, first_step);
+}
+
+static std::shared_ptr<Tensor> dispatch_im2col_3d(std::shared_ptr<Tensor> x, int KD, int KH, int KW,
+                                                    int SD, int SH, int SW, int PD, int PH, int PW,
+                                                    int DD, int DH, int DW, int OD, int OH, int OW) {
+    if (x->shape.size() != 5)
+        throw std::invalid_argument("im2col_3d: expected input of shape (batch, channels, D, H, W), got rank " +
+                                     std::to_string(x->shape.size()));
+    if (x->dtype != DType::FLOAT32)
+        throw std::runtime_error("im2col_3d: only float32 is currently supported.");
+    if (!x->is_contiguous()) x = dispatch_contiguous(x);
+
+    int B = x->shape[0], C = x->shape[1];
+    std::vector<int> col_shape = {B, C * KD * KH * KW, OD * OH * OW};
+    auto result = std::make_shared<Tensor>(col_shape, x->device);
+#ifndef AAKAAR_NO_CUDA
+    if (x->device == "cuda")
+        run_cuda_im2col_3d(x, result, KD, KH, KW, SD, SH, SW, PD, PH, PW, DD, DH, DW, OD, OH, OW);
+    else
+#endif
+    run_cpu_im2col_3d(x, result, KD, KH, KW, SD, SH, SW, PD, PH, PW, DD, DH, DW, OD, OH, OW);
+
+    if (g_grad_enabled && x->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {x};
+        node->op_name = "im2col_3d";
+        int B_c = B, C_c = C, D_c = x->shape[2], H_c = x->shape[3], W_c = x->shape[4];
+        int KD_c=KD,KH_c=KH,KW_c=KW,SD_c=SD,SH_c=SH,SW_c=SW,PD_c=PD,PH_c=PH,PW_c=PW,DD_c=DD,DH_c=DH,DW_c=DW,OD_c=OD,OH_c=OH,OW_c=OW;
+        auto dev = x->device;
+        node->backward_fn = [B_c,C_c,D_c,H_c,W_c,KD_c,KH_c,KW_c,SD_c,SH_c,SW_c,PD_c,PH_c,PW_c,DD_c,DH_c,DW_c,OD_c,OH_c,OW_c,dev]
+                             (std::shared_ptr<Tensor> grad_out) {
+            auto grad_x = std::make_shared<Tensor>(std::vector<int>{B_c, C_c, D_c, H_c, W_c}, dev);
+#ifndef AAKAAR_NO_CUDA
+            if (dev == "cuda")
+                run_cuda_col2im_3d(grad_out, grad_x, B_c,C_c,D_c,H_c,W_c,KD_c,KH_c,KW_c,SD_c,SH_c,SW_c,PD_c,PH_c,PW_c,DD_c,DH_c,DW_c,OD_c,OH_c,OW_c);
+            else
+#endif
+            run_cpu_col2im_3d(grad_out, grad_x, B_c,C_c,D_c,H_c,W_c,KD_c,KH_c,KW_c,SD_c,SH_c,SW_c,PD_c,PH_c,PW_c,DD_c,DH_c,DW_c,OD_c,OH_c,OW_c);
+            return std::vector<std::shared_ptr<Tensor>>{grad_x};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
 static std::shared_ptr<Tensor> tensor_from_numpy_typed(py::array arr, std::string device, bool requires_grad) {
     py::buffer_info buf = arr.request();
     std::vector<int> shape;
@@ -1723,7 +2173,22 @@ static std::shared_ptr<Tensor> tensor_from_numpy_typed(py::array arr, std::strin
 
 #ifndef AAKAAR_NO_CUDA
     if (device == "cuda") {
-        cudaMemcpy(result->data_ptr, cbuf.ptr, bytes, cudaMemcpyHostToDevice);
+        // Route through a reusable pinned staging buffer + a genuinely
+        // async copy, instead of a synchronous cudaMemcpy straight from
+        // pageable numpy memory. A pageable-source cudaMemcpy forces the
+        // CUDA driver to silently allocate its own temporary pinned
+        // buffer, stage into it, DMA, then tear it down — every single
+        // call. On Windows/WDDM that hidden per-call allocation, not the
+        // DMA itself, is what dominates. Pinning a persistent, size-keyed,
+        // reused buffer removes that cost and lets this call return before
+        // the transfer completes, so subsequent same-stream work (kernel
+        // launches, which all run on the default stream here) overlaps
+        // with it instead of stalling behind it.
+        auto& pinned = PinnedAllocator::get_instance();
+        auto pbuf = pinned.acquire(bytes);
+        std::memcpy(pbuf.ptr, cbuf.ptr, bytes);  // host-to-host; microseconds even at MB scale
+        cudaMemcpyAsync(result->data_ptr, pbuf.ptr, bytes, cudaMemcpyHostToDevice, 0);
+        pinned.release(bytes, pbuf, 0);
         result->requires_grad = requires_grad;
         return result;
     }
@@ -2039,6 +2504,27 @@ PYBIND11_MODULE(_C, m) {
     m.def("_bce_fused", &dispatch_bce_fused, py::arg("pred"), py::arg("target"));
     m.def("_smoothl1_fused", &dispatch_smoothl1_fused, py::arg("pred"), py::arg("target"), py::arg("beta") = 1.0f);
     m.def("_multimargin_fused", &dispatch_multimargin_fused, py::arg("logits"), py::arg("onehot"), py::arg("margin") = 1.0f);
+    m.def("im2col_2d", &dispatch_im2col_2d,
+          py::arg("x"), py::arg("KH"), py::arg("KW"), py::arg("SH"), py::arg("SW"),
+          py::arg("PH"), py::arg("PW"), py::arg("DH"), py::arg("DW"), py::arg("OH"), py::arg("OW"));
+    m.def("im2col_3d", &dispatch_im2col_3d,
+      py::arg("x"), py::arg("KD"), py::arg("KH"), py::arg("KW"),
+      py::arg("SD"), py::arg("SH"), py::arg("SW"),
+      py::arg("PD"), py::arg("PH"), py::arg("PW"),
+      py::arg("DD"), py::arg("DH"), py::arg("DW"),
+      py::arg("OD"), py::arg("OH"), py::arg("OW"));
+    m.def("_adam_step_fused", &dispatch_adam_step_fused,
+      py::arg("p"), py::arg("grad"), py::arg("m"), py::arg("v"),
+      py::arg("lr"), py::arg("beta1"), py::arg("beta2"), py::arg("eps"),
+      py::arg("weight_decay"), py::arg("t"));
+    m.def("_sgd_step_fused", &dispatch_sgd_step_fused);
+    m.def("_adamw_step_fused", &dispatch_adamw_step_fused);
+    m.def("_adamax_step_fused", &dispatch_adamax_step_fused);
+    m.def("_nadam_step_fused", &dispatch_nadam_step_fused);
+    m.def("_radam_step_fused", &dispatch_radam_step_fused);
+    m.def("_rmsprop_step_fused", &dispatch_rmsprop_step_fused);
+    m.def("_adadelta_step_fused", &dispatch_adadelta_step_fused);
+    m.def("_rprop_step_fused", &dispatch_rprop_step_fused);
 
 #ifndef AAKAAR_NO_CUDA
     m.def("generate_random", &run_curand_uniform, "Fill GPU Tensor with random numbers");
@@ -2054,6 +2540,11 @@ PYBIND11_MODULE(_C, m) {
     m.def("_mse_fused", &dispatch_mse_fused, py::arg("pred"), py::arg("target"));
     m.def("_nll_fused", &dispatch_nll_fused, py::arg("log_probs"), py::arg("onehot"));
     m.def("_bce_logits_fused", &dispatch_bce_logits_fused, py::arg("logits"), py::arg("target"));
+    py::class_<GraphHandle, std::shared_ptr<GraphHandle>>(m, "CudaGraphHandle");
+    m.def("_cuda_graph_begin_capture", &cuda_graph_begin_capture);
+    m.def("_cuda_graph_end_capture", &cuda_graph_end_capture);
+    m.def("_cuda_graph_replay", &cuda_graph_replay);
+    m.def("_cuda_graph_synchronize", &cuda_graph_synchronize);
     m.def("_allocator_stats", []() -> py::tuple {
         auto [hits, misses] = CachingAllocator::get_instance().get_stats();
         return py::make_tuple(hits, misses);
@@ -2065,6 +2556,23 @@ PYBIND11_MODULE(_C, m) {
           py::arg("x"), py::arg("w"), py::arg("stride"), py::arg("padding"), py::arg("dilation"));
     m.def("_set_cudnn_tf32_enabled", &set_cudnn_tf32_enabled);
     m.def("_get_cudnn_tf32_enabled", &get_cudnn_tf32_enabled);
+    m.def("_conv1d_forward_into", &run_cudnn_conv1d_forward_into);
+    m.def("_conv1d_backward_data_into", &run_cudnn_conv1d_backward_data_into);
+    m.def("_conv1d_backward_filter_into", &run_cudnn_conv1d_backward_filter_into);
+    m.def("_cudnn_set_stream_for_capture", &cudnn_set_stream_for_capture);
+    m.def("_cudnn_reset_stream", &cudnn_reset_stream);
+    m.def("_cuda_graph_replay_two", &cuda_graph_replay_two);
+    m.def("_cuda_graph_replay_full_step", &cuda_graph_replay_full_step);
+    m.def("conv2d_cudnn", &dispatch_conv2d_cudnn,
+          py::arg("x"), py::arg("w"), py::arg("SH"), py::arg("SW"),
+          py::arg("PH"), py::arg("PW"), py::arg("DH"), py::arg("DW"));
+    m.def("_conv2d_forward_into", &run_cudnn_conv2d_forward_into);
+    m.def("_conv2d_backward_data_into", &run_cudnn_conv2d_backward_data_into);
+    m.def("_conv2d_backward_filter_into", &run_cudnn_conv2d_backward_filter_into);
+    m.def("conv3d_cudnn", &dispatch_conv3d_cudnn,
+      py::arg("x"), py::arg("w"), py::arg("SD"), py::arg("SH"), py::arg("SW"),
+      py::arg("PD"), py::arg("PH"), py::arg("PW"), py::arg("DD"), py::arg("DH"), py::arg("DW"));
+    m.def("_warm_cudnn", &warm_cudnn);
     m.attr("HAS_CUDNN") = true;
 #else
     m.attr("HAS_CUDNN") = false;

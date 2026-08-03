@@ -84,3 +84,117 @@ class Conv1d:
 
     def parameters(self):
         return [self.weight, self.bias] if self.has_bias else [self.weight]
+
+class Conv2d:
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, bias=True, device="cpu", dtype="float32"):
+        if dtype != "float32":
+            print(f"WARNING: Conv2d(dtype='{dtype}') will be forward-only — no gradients.")
+
+        KH, KW = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = (KH, KW)
+        self.stride = (stride, stride) if isinstance(stride, int) else stride
+        self.padding = (padding, padding) if isinstance(padding, int) else padding
+        self.dilation = (dilation, dilation) if isinstance(dilation, int) else dilation
+        self.dtype = dtype
+
+        np_dtype = {"float32": np.float32, "float64": np.float64,
+                    "int32": np.int32, "int64": np.int64}[dtype]
+        requires_grad = (dtype == "float32")
+
+        fan_in = in_channels * KH * KW
+        if dtype in ("float32", "float64"):
+            limit = 1.0 / np.sqrt(fan_in)
+            w = np.random.uniform(-limit, limit, (out_channels, in_channels, KH, KW)).astype(np_dtype)
+        else:
+            w = np.zeros((out_channels, in_channels, KH, KW), dtype=np_dtype)
+        self.weight = from_numpy(w, device=device, requires_grad=requires_grad)
+
+        self.has_bias = bias
+        if bias:
+            if dtype in ("float32", "float64"):
+                bound = 1.0 / np.sqrt(fan_in)
+                b = np.random.uniform(-bound, bound, (1, out_channels, 1, 1)).astype(np_dtype)
+            else:
+                b = np.zeros((1, out_channels, 1, 1), dtype=np_dtype)
+            self.bias = from_numpy(b, device=device, requires_grad=requires_grad)
+        else:
+            self.bias = None
+
+    def __call__(self, x):
+        if len(x.shape) != 4:
+            raise ValueError(f"Conv2d expects input of shape (batch, in_channels, H, W), got {x.shape}")
+        if x.shape[1] != self.in_channels:
+            raise ValueError(f"Conv2d: expected {self.in_channels} input channels, got {x.shape[1]}")
+        out = aakaar.conv2d(x, self.weight, self.stride, self.padding, self.dilation)
+        if self.has_bias:
+            out = out + self.bias
+        return out
+
+    def parameters(self):
+        return [self.weight, self.bias] if self.has_bias else [self.weight]
+
+class Conv3d:
+    """3D convolution: y = conv(x, weight) + bias.
+
+    x:      (batch, in_channels, D, H, W)
+    weight: (out_channels, in_channels, KD, KH, KW)
+    y:      (batch, out_channels, OD, OH, OW)
+
+    Same design as Conv1d/Conv2d: im2col (custom CPU/CUDA kernel) + matmul
+    fallback, or cuDNN when available. groups>1 not implemented.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, bias=True, device="cpu", dtype="float32"):
+        if dtype != "float32":
+            print(f"WARNING: Conv3d(dtype='{dtype}') will be forward-only — no gradients. "
+                  f"Only float32 supports autograd anywhere in aakaar right now.")
+
+        KD, KH, KW = (kernel_size,) * 3 if isinstance(kernel_size, int) else kernel_size
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = (KD, KH, KW)
+        self.stride = (stride,) * 3 if isinstance(stride, int) else stride
+        self.padding = (padding,) * 3 if isinstance(padding, int) else padding
+        self.dilation = (dilation,) * 3 if isinstance(dilation, int) else dilation
+        self.dtype = dtype
+
+        np_dtype = {"float32": np.float32, "float64": np.float64,
+                    "int32": np.int32, "int64": np.int64}[dtype]
+        requires_grad = (dtype == "float32")
+
+        fan_in = in_channels * KD * KH * KW
+        if dtype in ("float32", "float64"):
+            limit = 1.0 / np.sqrt(fan_in)
+            w = np.random.uniform(-limit, limit,
+                                   (out_channels, in_channels, KD, KH, KW)).astype(np_dtype)
+        else:
+            w = np.zeros((out_channels, in_channels, KD, KH, KW), dtype=np_dtype)
+
+        self.weight = from_numpy(w, device=device, requires_grad=requires_grad)
+
+        self.has_bias = bias
+        if bias:
+            if dtype in ("float32", "float64"):
+                bound = 1.0 / np.sqrt(fan_in)
+                b = np.random.uniform(-bound, bound, (1, out_channels, 1, 1, 1)).astype(np_dtype)
+            else:
+                b = np.zeros((1, out_channels, 1, 1, 1), dtype=np_dtype)
+            self.bias = from_numpy(b, device=device, requires_grad=requires_grad)
+        else:
+            self.bias = None
+
+    def __call__(self, x):
+        if len(x.shape) != 5:
+            raise ValueError(f"Conv3d expects input of shape (batch, in_channels, D, H, W), got {x.shape}")
+        if x.shape[1] != self.in_channels:
+            raise ValueError(f"Conv3d: expected {self.in_channels} input channels, got {x.shape[1]}")
+        out = aakaar.conv3d(x, self.weight, self.stride, self.padding, self.dilation)
+        if self.has_bias:
+            out = out + self.bias  # already hits the fast channel-bias add-kernel path
+        return out
+
+    def parameters(self):
+        return [self.weight, self.bias] if self.has_bias else [self.weight]

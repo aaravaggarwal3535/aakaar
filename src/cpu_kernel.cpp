@@ -1632,3 +1632,61 @@ std::shared_ptr<Tensor> run_cpu_bce_logits_backward(std::shared_ptr<Tensor> logi
     }
     return result;
 }
+
+// Fully fused Adam parameter update (CPU) — same single-pass semantics as
+// the CUDA kernel in adam_kernel.cu, for parity and for CPU-device training.
+void run_cpu_adam_step(std::shared_ptr<Tensor> p, std::shared_ptr<Tensor> grad,
+                        std::shared_ptr<Tensor> m, std::shared_ptr<Tensor> v,
+                        float lr, float beta1, float beta2, float eps,
+                        float weight_decay, int t) {
+    if (!p->is_contiguous() || !grad->is_contiguous() || !m->is_contiguous() || !v->is_contiguous())
+        throw std::invalid_argument("adam_step_fused: all tensors must be contiguous.");
+    if (p->size != grad->size || p->size != m->size || p->size != v->size)
+        throw std::invalid_argument("adam_step_fused: p/grad/m/v must have matching sizes.");
+
+    int n = p->size;
+    if (n == 0) return;
+
+    float bias_correction1_inv = 1.0f / (1.0f - std::pow(beta1, (float)t));
+    float bias_correction2_inv = 1.0f / (1.0f - std::pow(beta2, (float)t));
+
+    float* pp = p->fptr();
+    const float* gp = grad->fptr();
+    float* mp = m->fptr();
+    float* vp = v->fptr();
+
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
+        float g = gp[i];
+        if (weight_decay != 0.0f) g += pp[i] * weight_decay;
+
+        float m_new = mp[i] * beta1 + g * (1.0f - beta1);
+        float v_new = vp[i] * beta2 + g * g * (1.0f - beta2);
+        mp[i] = m_new;
+        vp[i] = v_new;
+
+        float m_hat = m_new * bias_correction1_inv;
+        float v_hat = v_new * bias_correction2_inv;
+        pp[i] = pp[i] - lr * (m_hat / (std::sqrt(v_hat) + eps));
+    }
+}
+
+std::shared_ptr<Tensor> run_cpu_matmul_a_bt(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (!a->is_contiguous() || !b->is_contiguous())
+        throw std::invalid_argument("matmul_a_bt requires contiguous tensors.");
+    int m = a->shape[0], k = a->shape[1], n = b->shape[0];
+    auto result = std::make_shared<Tensor>(std::vector<int>{m, n}, std::string("cpu"));
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                m, n, k, 1.0f, a->fptr(), k, b->fptr(), k, 0.0f, result->fptr(), n);
+    return result;
+}
+
+std::shared_ptr<Tensor> run_cpu_matmul_at_b(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (!a->is_contiguous() || !b->is_contiguous())
+        throw std::invalid_argument("matmul_at_b requires contiguous tensors.");
+    int k = a->shape[0], m = a->shape[1], n = b->shape[1];
+    auto result = std::make_shared<Tensor>(std::vector<int>{m, n}, std::string("cpu"));
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                m, n, k, 1.0f, a->fptr(), m, b->fptr(), n, 0.0f, result->fptr(), n);
+    return result;
+}

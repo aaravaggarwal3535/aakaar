@@ -21,7 +21,7 @@ static bool g_use_tf32 = false;
 // Separate from matmul's TF32 flag, matching torch's own separation of
 // torch.backends.cuda.matmul.allow_tf32 vs torch.backends.cudnn.allow_tf32
 // — these have different history/defaults in torch and shouldn't be conflated.
-static bool g_use_cudnn_tf32 = true;  // torch defaults cudnn.allow_tf32 to True on Ampere+
+static bool g_use_cudnn_tf32 = false;
 
 void set_cudnn_tf32_enabled(bool enabled) { g_use_cudnn_tf32 = enabled; }
 bool get_cudnn_tf32_enabled() { return g_use_cudnn_tf32; }
@@ -338,4 +338,65 @@ std::shared_ptr<Tensor> run_cuda_matmul_int_typed(std::shared_ptr<Tensor> a, std
         case DType::INT64: return run_cuda_matmul_int_typed_impl<int64_t>(a, b, DType::INT64);
         default: throw std::runtime_error("matmul(): unsupported integer dtype '" + dtype_name(a->dtype) + "'");
     }
+}
+
+// C(m,n) = A(m,k) @ B(n,k)^T  — B passed in its ORIGINAL (n,k) layout,
+// no transpose materialization. Used by matmul's backward for da = grad_out @ weight^T,
+// where weight is already stored as (n,k) = (in_features, out_features) and
+// never needs to be physically transposed at all.
+std::shared_ptr<Tensor> run_cublas_matmul_a_bt(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (!a->is_contiguous() || !b->is_contiguous())
+        throw std::invalid_argument("matmul_a_bt requires contiguous tensors.");
+    int m = a->shape[0], k = a->shape[1];
+    int n = b->shape[0];
+    if (b->shape[1] != k)
+        throw std::invalid_argument("matmul_a_bt: inner dimensions must match");
+
+    auto result = std::make_shared<Tensor>(std::vector<int>{m, n}, std::string("cuda"));
+    const float alpha = 1.0f, beta = 0.0f;
+    cublasHandle_t handle = CublasManager::get_instance().handle;
+
+    // Derivation (row-major C = A @ B^T, via the standard column-major
+    // reinterpretation trick): cublasSgemm(T, N, n, m, k, alpha, B, k, A, k, beta, C, n)
+    cublasStatus_t status = cublasSgemm(
+        handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        n, m, k,
+        &alpha,
+        b->fptr(), k,
+        a->fptr(), k,
+        &beta,
+        result->fptr(), n
+    );
+    if (status != CUBLAS_STATUS_SUCCESS)
+        throw std::runtime_error("cuBLAS SGEMM (a_bt) failed");
+    return result;
+}
+
+// C(m,n) = A(k,m)^T @ B(k,n) — A passed in its ORIGINAL (k,m) layout.
+// Used by matmul's backward for db = x^T @ grad_out, where x is already
+// stored as (k,m) = (batch, in_features) and never needs transposing.
+std::shared_ptr<Tensor> run_cublas_matmul_at_b(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (!a->is_contiguous() || !b->is_contiguous())
+        throw std::invalid_argument("matmul_at_b requires contiguous tensors.");
+    int k = a->shape[0], m = a->shape[1];
+    int n = b->shape[1];
+    if (b->shape[0] != k)
+        throw std::invalid_argument("matmul_at_b: inner dimensions must match");
+
+    auto result = std::make_shared<Tensor>(std::vector<int>{m, n}, std::string("cuda"));
+    const float alpha = 1.0f, beta = 0.0f;
+    cublasHandle_t handle = CublasManager::get_instance().handle;
+
+    cublasStatus_t status = cublasSgemm(
+        handle, CUBLAS_OP_N, CUBLAS_OP_T,
+        n, m, k,
+        &alpha,
+        b->fptr(), n,
+        a->fptr(), m,
+        &beta,
+        result->fptr(), n
+    );
+    if (status != CUBLAS_STATUS_SUCCESS)
+        throw std::runtime_error("cuBLAS SGEMM (at_b) failed");
+    return result;
 }

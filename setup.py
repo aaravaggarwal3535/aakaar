@@ -210,6 +210,10 @@ class CUDABuildExtension(build_ext):
                 for ext in self.extensions:
                     if "src/conv_cudnn.cu" not in ext.sources:
                         ext.sources.append("src/conv_cudnn.cu")
+                    if "src/conv2d_cudnn.cu" not in ext.sources:
+                        ext.sources.append("src/conv2d_cudnn.cu")
+                    if "src/conv3d_cudnn.cu" not in ext.sources:      # <-- new
+                        ext.sources.append("src/conv3d_cudnn.cu")
                     if cudnn_include not in ext.include_dirs:
                         ext.include_dirs.append(cudnn_include)
                     if cudnn_lib not in ext.library_dirs:
@@ -273,15 +277,23 @@ else:
 aakaar_ext = Extension(
     "aakaar._C",
     sources=[
-        "src/bindings.cpp",
-        "src/cpu_kernel.cpp",
-        "src/conv_kernel.cpp",
-        "src/random_kernel.cu",
-        "src/matmul_kernel.cu",
-        "src/elementwise_kernel.cu",
-        "src/reduction_kernel.cu",
-        "src/strided_copy_kernel.cu",
-        "src/conv_kernel.cu",
+    "src/bindings.cpp",
+    "src/cpu_kernel.cpp",
+    "src/conv_kernel.cpp",
+    "src/conv2d_kernel.cpp",
+    "src/conv3d_kernel.cpp",      # <-- new
+    "src/random_kernel.cu",
+    "src/matmul_kernel.cu",
+    "src/elementwise_kernel.cu",
+    "src/reduction_kernel.cu",
+    "src/strided_copy_kernel.cu",
+    "src/conv_kernel.cu",
+    "src/conv2d_kernel.cu",
+    "src/conv3d_kernel.cu",       # <-- new
+    "src/cuda_graph.cu",
+    "src/adam_kernel.cu",
+    "src/optim_kernels.cu",
+    "src/optim_kernels_cpu.cpp",
     ],
     include_dirs=[
         pybind11.get_include(),

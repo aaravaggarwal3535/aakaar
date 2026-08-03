@@ -94,7 +94,9 @@ public:
             } else {
                 void* ptr;
                 cudaError_t err = cudaMalloc(&ptr, bytes);
-                if (err != cudaSuccess) throw std::runtime_error("Aakaar out of memory!");
+                if (err != cudaSuccess)
+                    throw std::runtime_error(std::string("Aakaar CUDA allocation failed: ") + cudaGetErrorString(err) +
+                                            " (requested " + std::to_string(bytes) + " bytes)");
                 owned_ptr = ptr;
             }
 #endif

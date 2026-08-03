@@ -4,12 +4,32 @@ import contextlib
 
 __version__ = "0.2.1"
 
+
 def _add_windows_cuda_dll_dirs():
     if sys.platform != "win32":
         return
+
+    # torch's official Windows CUDA wheels bundle their OWN cuDNN DLLs
+    # directly inside torch/lib — a completely separate installation from
+    # this package's pip-installed nvidia-cudnn-cu* dependency. If both
+    # get registered on the DLL search path in the same process, cuDNN's
+    # lazy per-sub-library loading (cudnn_ops64_9.dll, cudnn_cnn64_9.dll,
+    # cudnn_graph64_9.dll, ...) can resolve different sub-libraries from
+    # the two different builds, which cuDNN detects and refuses with
+    # CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH.
+    #
+    # There's no version-pinning fix that survives a torch upgrade, so
+    # instead: whenever torch is already imported, skip registering
+    # aakaar's own cuDNN directory entirely and defer to whatever cuDNN
+    # torch already made resolvable. os.add_dll_directory() is process-
+    # wide, so torch's directory (registered when `import torch` ran) is
+    # already visible here — aakaar just needs to not add a competing one.
+    # aakaar's cuDNN calls only use cuDNN 9.x's stable API surface, so
+    # this works regardless of the exact minor/patch version torch bundles.
+    torch_already_loaded = "torch" in sys.modules
+
     import site
     search_roots = site.getsitepackages() + [site.getusersitepackages()]
-    found_any = False
     for root in search_roots:
         nvidia_root = os.path.join(root, "nvidia")
         if not os.path.isdir(nvidia_root):
@@ -19,29 +39,31 @@ def _add_windows_cuda_dll_dirs():
                 consolidated_bin = os.path.join(nvidia_root, entry, "bin", "x86_64")
                 if os.path.isdir(consolidated_bin):
                     os.add_dll_directory(consolidated_bin)
-                    found_any = True
         for pkg in ("cuda_runtime", "curand", "cublas", "cuda_nvrtc", "cudnn"):
+            if pkg == "cudnn" and torch_already_loaded:
+                continue
             bin_dir = os.path.join(nvidia_root, pkg, "bin")
             if os.path.isdir(bin_dir):
                 os.add_dll_directory(bin_dir)
-                found_any = True
-    # Also check the system CUDA toolkit / standalone cuDNN install, in case
-    # the user installed those instead of the pip packages.
+                if pkg == "cudnn":
+                    if bin_dir not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+
     cuda_home = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME")
     if cuda_home and os.path.isdir(os.path.join(cuda_home, "bin")):
         os.add_dll_directory(os.path.join(cuda_home, "bin"))
-        found_any = True
-    nvidia_cudnn_root = r"C:\Program Files\NVIDIA\CUDNN"
-    if os.path.isdir(nvidia_cudnn_root):
-        for entry in os.listdir(nvidia_cudnn_root):
-            bin_base = os.path.join(nvidia_cudnn_root, entry, "bin")
-            if os.path.isdir(bin_base):
-                for sub in os.listdir(bin_base):
-                    full = os.path.join(bin_base, sub)
-                    if os.path.isdir(full):
-                        os.add_dll_directory(full)
-                        found_any = True
-    return found_any
+
+    if not torch_already_loaded:
+        nvidia_cudnn_root = r"C:\Program Files\NVIDIA\CUDNN"
+        if os.path.isdir(nvidia_cudnn_root):
+            for entry in os.listdir(nvidia_cudnn_root):
+                bin_base = os.path.join(nvidia_cudnn_root, entry, "bin")
+                if os.path.isdir(bin_base):
+                    for sub in os.listdir(bin_base):
+                        full = os.path.join(bin_base, sub)
+                        if os.path.isdir(full):
+                            os.add_dll_directory(full)
+
 
 def _add_windows_openblas_dll_dir():
     if sys.platform != "win32":
@@ -50,10 +72,10 @@ def _add_windows_openblas_dll_dir():
     if os.path.isdir(bundled_bin):
         os.add_dll_directory(bundled_bin)
         return
-    # Fallback for local development before the DLL is bundled/reinstalled
     dev_bin = os.environ.get("AAKAAR_OPENBLAS_BIN", r"C:\openblas-prebuilt\bin")
     if os.path.isdir(dev_bin):
         os.add_dll_directory(dev_bin)
+
 
 def _preload_linux_cuda_libs():
     if sys.platform != "linux":
@@ -80,6 +102,16 @@ def _preload_linux_cuda_libs():
             f"{[f[0] for f in failures]}. GPU features may not work. "
             f"First error: {failures[0][1]}"
         )
+
+
+if sys.platform == "win32" and "torch" not in sys.modules:
+    import warnings
+    warnings.warn(
+        "aakaar is being imported before torch in this process. If you plan to "
+        "use both aakaar and torch together, import torch first to avoid a known "
+        "Windows cuDNN DLL-loading conflict.",
+        stacklevel=2,
+    )
 
 _add_windows_cuda_dll_dirs()
 _add_windows_openblas_dll_dir()
@@ -276,12 +308,81 @@ def conv1d(x, weight, stride=1, padding=0, dilation=1):
 
 def set_cudnn_tf32(enabled: bool = True):
     """Enable/disable TF32 tensor-core math for cuDNN convolutions (Ampere+).
-    Matches torch's torch.backends.cudnn.allow_tf32, which defaults to True.
-    Trades a small amount of precision for significant speed on conv ops —
-    same trade torch makes by default. Set to False if you need exact
-    float32 precision and can accept the speed cost."""
+    Matches torch's torch.backends.cudnn.allow_tf32, which defaults to True
+    on supported hardware. NOTE: on some cuDNN 9.x / driver / GPU combinations
+    (confirmed on this project: cuDNN 9.2.0 + driver 610.74 + RTX 4060),
+    TF32 mode can cause cudnnFindConvolutionForwardAlgorithmEx to report
+    every candidate algorithm as failed, even though the GPU itself supports
+    TF32. Root cause not fully isolated. aakaar defaults TF32 OFF for
+    reliability; call set_cudnn_tf32(True) explicitly to opt in and test
+    on your own hardware first."""
     if _C.HAS_CUDA:
         _C._set_cudnn_tf32_enabled(enabled)
 
 def is_cudnn_tf32_enabled():
     return _C._get_cudnn_tf32_enabled() if _C.HAS_CUDA else False
+
+def im2col_2d(x, KH, KW, SH, SW, PH, PW, DH, DW, OH, OW):
+    """Unfolds a (B, C, H, W) tensor into (B, C*KH*KW, OH*OW) sliding windows.
+    Internal primitive used by nn.Conv2d — not usually called directly."""
+    return _C.im2col_2d(x, KH, KW, SH, SW, PH, PW, DH, DW, OH, OW)
+
+def conv2d(x, weight, stride=(1, 1), padding=(0, 0), dilation=(1, 1)):
+    """Fastest available Conv2d forward+backward. Routes to cuDNN for
+    float32 CUDA tensors when this build has cuDNN support; falls back to
+    im2col + matmul (cuBLAS/OpenBLAS) otherwise."""
+    SH, SW = (stride, stride) if isinstance(stride, int) else stride
+    PH, PW = (padding, padding) if isinstance(padding, int) else padding
+    DH, DW = (dilation, dilation) if isinstance(dilation, int) else dilation
+
+    use_cudnn = (getattr(_C, "HAS_CUDNN", False) and x.device == "cuda" and weight.device == "cuda"
+                 and x.dtype == "float32" and weight.dtype == "float32")
+    if use_cudnn:
+        return _C.conv2d_cudnn(x, weight, SH, SW, PH, PW, DH, DW)
+
+    C_out, C_in, KH, KW = weight.shape
+    B, _, H, W = x.shape
+    OH = (H + 2 * PH - DH * (KH - 1) - 1) // SH + 1
+    OW = (W + 2 * PW - DW * (KW - 1) - 1) // SW + 1
+    if OH <= 0 or OW <= 0:
+        raise ValueError(f"conv2d: computed output size ({OH},{OW}) <= 0")
+    col = im2col_2d(x, KH, KW, SH, SW, PH, PW, DH, DW, OH, OW)
+    w_flat = weight.reshape([C_out, C_in * KH * KW]).reshape([1, C_out, C_in * KH * KW])
+    out = matmul(w_flat, col)  # (B, C_out, OH*OW)
+    return out.reshape([B, C_out, OH, OW])
+
+def im2col_3d(x, kernel_size, stride, padding, dilation, out_size):
+    """Unfolds a (B, C, D, H, W) tensor into (B, C*KD*KH*KW, OD*OH*OW)
+    sliding windows. Internal primitive used by nn.Conv3d — not usually
+    called directly."""
+    KD, KH, KW = kernel_size
+    SD, SH, SW = stride
+    PD, PH, PW = padding
+    DD, DH, DW = dilation
+    OD, OH, OW = out_size
+    return _C.im2col_3d(x, KD, KH, KW, SD, SH, SW, PD, PH, PW, DD, DH, DW, OD, OH, OW)
+
+def conv3d(x, weight, stride=(1, 1, 1), padding=(0, 0, 0), dilation=(1, 1, 1)):
+    """Fastest available Conv3d forward+backward. Routes to cuDNN for
+    float32 CUDA tensors when this build was compiled with cuDNN support;
+    falls back to im2col + matmul (cuBLAS/OpenBLAS) otherwise."""
+    SD, SH, SW = (stride, stride, stride) if isinstance(stride, int) else stride
+    PD, PH, PW = (padding, padding, padding) if isinstance(padding, int) else padding
+    DD, DH, DW = (dilation, dilation, dilation) if isinstance(dilation, int) else dilation
+
+    use_cudnn = (getattr(_C, "HAS_CUDNN", False) and x.device == "cuda" and weight.device == "cuda"
+                 and x.dtype == "float32" and weight.dtype == "float32")
+    if use_cudnn:
+        return _C.conv3d_cudnn(x, weight, SD, SH, SW, PD, PH, PW, DD, DH, DW)
+
+    C_out, C_in, KD, KH, KW = weight.shape
+    B, _, D, H, W = x.shape
+    OD = (D + 2 * PD - DD * (KD - 1) - 1) // SD + 1
+    OH = (H + 2 * PH - DH * (KH - 1) - 1) // SH + 1
+    OW = (W + 2 * PW - DW * (KW - 1) - 1) // SW + 1
+    if OD <= 0 or OH <= 0 or OW <= 0:
+        raise ValueError(f"conv3d: computed output size ({OD},{OH},{OW}) <= 0")
+    col = im2col_3d(x, (KD, KH, KW), (SD, SH, SW), (PD, PH, PW), (DD, DH, DW), (OD, OH, OW))
+    w_flat = weight.reshape([C_out, C_in * KD * KH * KW]).reshape([1, C_out, C_in * KD * KH * KW])
+    out = matmul(w_flat, col)  # (B, C_out, OD*OH*OW)
+    return out.reshape([B, C_out, OD, OH, OW])

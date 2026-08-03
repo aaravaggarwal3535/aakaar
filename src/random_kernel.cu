@@ -116,7 +116,7 @@ void run_curand_randint(std::shared_ptr<Tensor> t, long long low, long long high
 
     float* temp;
     cudaError_t merr = cudaMalloc(&temp, (size_t)n * sizeof(float));
-    if (merr != cudaSuccess) throw std::runtime_error("Aakaar out of memory!");
+    if (merr != cudaSuccess) throw std::runtime_error(std::string("Aakaar CUDA allocation failed: ") + cudaGetErrorString(merr));
 
     curandStatus_t status = curandGenerateUniform(generator, temp, n);
     if (status != CURAND_STATUS_SUCCESS) {
