@@ -157,11 +157,55 @@ std::shared_ptr<Tensor> run_cudnn_conv2d_forward(std::shared_ptr<Tensor> x, std:
 
             int best = -1;
             for (int i = 0; i < returned; ++i) {
-                if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { 
-                    best = i; 
-                    break; 
+                if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+                // See conv_cudnn.cu's identical guard for the full rationale: FFT-based
+                // algorithms decompose one logical call into many kernel launches,
+                // which cuDNN's own isolated-timing search doesn't capture. Confirmed
+                // via nsys for Conv1d/ConvTranspose1d at a large shape; applied here
+                // preventively since the mechanism is identical.
+                if (perf_results[i].algo == CUDNN_CONVOLUTION_FWD_ALGO_FFT ||
+                    perf_results[i].algo == CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING) continue;
+                best = i;
+                break;
+            }
+            if (best == -1) {
+                for (int i = 0; i < returned; ++i) {
+                    if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
                 }
             }
+
+            if (best != -1) {
+                int chosen = best;
+                if (chosen != -1) {
+                    int best_small = -1;
+                    for (int i = 0; i < returned; ++i) {
+                        if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+                        if (perf_results[i].algo == CUDNN_CONVOLUTION_FWD_ALGO_FFT ||
+                            perf_results[i].algo == CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING) continue;
+                        // Widened to 1.5x (from 1.25x) specifically because cuDNN's
+                        // one-shot search timing is noisy enough, run to run, that a
+                        // tighter margin caused this exact tiebreak to flip between two
+                        // candidates non-deterministically across separate process runs
+                        // at the same shape -- confirmed directly: two candidates whose
+                        // true costs are close enough that measurement noise alone moved
+                        // one in and out of a 1.25x window across six back-to-back runs.
+                        bool much_smaller_workspace = perf_results[i].memory < perf_results[best].memory / 10;
+                        bool close_enough_time = perf_results[i].time <= perf_results[best].time * 1.5;
+                        if (much_smaller_workspace && close_enough_time) {
+                            // Among all qualifying candidates, deterministically prefer
+                            // the smallest workspace, not just the first one encountered
+                            // in the (fastest-first) sorted order -- removes order/noise
+                            // dependence entirely for the final choice.
+                            if (best_small == -1 || perf_results[i].memory < perf_results[best_small].memory) {
+                                best_small = i;
+                            }
+                        }
+                    }
+                    if (best_small != -1) chosen = best_small;
+                }
+                best = chosen;
+            }
+
             return best;
         };
 
@@ -283,8 +327,50 @@ std::shared_ptr<Tensor> run_cudnn_conv2d_backward_data(std::shared_ptr<Tensor> g
                 throw std::runtime_error("conv2d_cudnn: no backward-data algorithm is both fast AND CUDA-graph-capturable for this shape.");
         } else {
             for (int i = 0; i < returned; ++i) {
-                if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
+                if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+                if (perf_results[i].algo == CUDNN_CONVOLUTION_BWD_DATA_ALGO_FFT ||
+                    perf_results[i].algo == CUDNN_CONVOLUTION_BWD_DATA_ALGO_FFT_TILING) continue;
+                best = i;
+                break;
             }
+            if (best == -1) {
+                for (int i = 0; i < returned; ++i) {
+                    if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
+                }
+            }
+
+            if (best != -1) {
+                int chosen = best;
+                if (chosen != -1) {
+                    int best_small = -1;
+                    for (int i = 0; i < returned; ++i) {
+                        if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+                        if (perf_results[i].algo == CUDNN_CONVOLUTION_BWD_DATA_ALGO_FFT ||
+                            perf_results[i].algo == CUDNN_CONVOLUTION_BWD_DATA_ALGO_FFT_TILING) continue;
+                        // Widened to 1.5x (from 1.25x) specifically because cuDNN's
+                        // one-shot search timing is noisy enough, run to run, that a
+                        // tighter margin caused this exact tiebreak to flip between two
+                        // candidates non-deterministically across separate process runs
+                        // at the same shape -- confirmed directly: two candidates whose
+                        // true costs are close enough that measurement noise alone moved
+                        // one in and out of a 1.25x window across six back-to-back runs.
+                        bool much_smaller_workspace = perf_results[i].memory < perf_results[best].memory / 10;
+                        bool close_enough_time = perf_results[i].time <= perf_results[best].time * 1.5;
+                        if (much_smaller_workspace && close_enough_time) {
+                            // Among all qualifying candidates, deterministically prefer
+                            // the smallest workspace, not just the first one encountered
+                            // in the (fastest-first) sorted order -- removes order/noise
+                            // dependence entirely for the final choice.
+                            if (best_small == -1 || perf_results[i].memory < perf_results[best_small].memory) {
+                                best_small = i;
+                            }
+                        }
+                    }
+                    if (best_small != -1) chosen = best_small;
+                }
+                best = chosen;
+            }
+
             if (best == -1)
                 throw std::runtime_error("conv2d_cudnn: all backward-data algorithm candidates reported failure status.");
 
@@ -325,7 +411,6 @@ std::shared_ptr<Tensor> run_cudnn_conv2d_backward_data(std::shared_ptr<Tensor> g
         entry.descs.convDesc, algo, ws_ptr, ws_bytes, &beta, entry.descs.xDesc, grad_x->fptr()), "conv backward data");
     return grad_x;
 }
-
 
 std::shared_ptr<Tensor> run_cudnn_conv2d_backward_filter(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> grad_y,
                                                          int C_out, int KH, int KW, int SH, int SW,
@@ -403,8 +488,50 @@ std::shared_ptr<Tensor> run_cudnn_conv2d_backward_filter(std::shared_ptr<Tensor>
                 throw std::runtime_error("conv2d_cudnn: no backward-filter algorithm is both fast AND CUDA-graph-capturable for this shape.");
         } else {
             for (int i = 0; i < returned; ++i) {
-                if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
+                if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+                if (perf_results[i].algo == CUDNN_CONVOLUTION_BWD_FILTER_ALGO_FFT ||
+                    perf_results[i].algo == CUDNN_CONVOLUTION_BWD_FILTER_ALGO_FFT_TILING) continue;
+                best = i;
+                break;
             }
+            if (best == -1) {
+                for (int i = 0; i < returned; ++i) {
+                    if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
+                }
+            }
+
+            if (best != -1) {
+                int chosen = best;
+                if (chosen != -1) {
+                    int best_small = -1;
+                    for (int i = 0; i < returned; ++i) {
+                        if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+                        if (perf_results[i].algo == CUDNN_CONVOLUTION_BWD_FILTER_ALGO_FFT ||
+                            perf_results[i].algo == CUDNN_CONVOLUTION_BWD_FILTER_ALGO_FFT_TILING) continue;
+                        // Widened to 1.5x (from 1.25x) specifically because cuDNN's
+                        // one-shot search timing is noisy enough, run to run, that a
+                        // tighter margin caused this exact tiebreak to flip between two
+                        // candidates non-deterministically across separate process runs
+                        // at the same shape -- confirmed directly: two candidates whose
+                        // true costs are close enough that measurement noise alone moved
+                        // one in and out of a 1.25x window across six back-to-back runs.
+                        bool much_smaller_workspace = perf_results[i].memory < perf_results[best].memory / 10;
+                        bool close_enough_time = perf_results[i].time <= perf_results[best].time * 1.5;
+                        if (much_smaller_workspace && close_enough_time) {
+                            // Among all qualifying candidates, deterministically prefer
+                            // the smallest workspace, not just the first one encountered
+                            // in the (fastest-first) sorted order -- removes order/noise
+                            // dependence entirely for the final choice.
+                            if (best_small == -1 || perf_results[i].memory < perf_results[best_small].memory) {
+                                best_small = i;
+                            }
+                        }
+                    }
+                    if (best_small != -1) chosen = best_small;
+                }
+                best = chosen;
+            }
+
             if (best == -1)
                 throw std::runtime_error("conv2d_cudnn: all backward-data algorithm candidates reported failure status.");
 

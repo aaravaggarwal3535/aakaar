@@ -316,6 +316,8 @@ static std::shared_ptr<Tensor> dispatch_sum_axis(std::shared_ptr<Tensor> a, int 
 static std::shared_ptr<Tensor> dispatch_broadcast_axis(std::shared_ptr<Tensor> a, int dim, int target_size);
 static std::shared_ptr<Tensor> dispatch_contiguous(std::shared_ptr<Tensor> a);
 static std::shared_ptr<Tensor> dispatch_huber_loss(std::shared_ptr<Tensor> pred, std::shared_ptr<Tensor> target, float delta);
+static std::shared_ptr<Tensor> dispatch_im2col_2d(std::shared_ptr<Tensor> x, int KH, int KW, int SH, int SW, int PH, int PW, int DH, int DW, int OH, int OW);
+static std::shared_ptr<Tensor> dispatch_im2col_3d(std::shared_ptr<Tensor> x, int KD, int KH, int KW, int SD, int SH, int SW, int PD, int PH, int PW, int DD, int DH, int DW, int OD, int OH, int OW);
 
 static bool is_channel_bias_shape(const std::vector<int>& b_shape, const std::vector<int>& a_shape, int& C, int& HW) {
     // Matches (1, C, 1, 1) against (B, C, H, W), or (1, C, 1) against (B, C, L).
@@ -1036,6 +1038,134 @@ static std::shared_ptr<Tensor> dispatch_im2col_1d(std::shared_ptr<Tensor> x, int
     return result;
 }
 
+static std::shared_ptr<Tensor> dispatch_col2im_1d(std::shared_ptr<Tensor> col, int C, int L_in, int stride,
+                                                     int padding, int dilation, int L_out) {
+    if (col->shape.size() != 3)
+        throw std::invalid_argument("col2im_1d: expected input of shape (batch, channels*kernel, out_length), got rank " +
+                                     std::to_string(col->shape.size()));
+    if (col->dtype != DType::FLOAT32)
+        throw std::runtime_error("col2im_1d: only float32 is currently supported.");
+    if (!col->is_contiguous()) col = dispatch_contiguous(col);
+
+    int B = col->shape[0];
+    int CK = col->shape[1];
+    if (CK % C != 0)
+        throw std::invalid_argument("col2im_1d: channels*kernel_size (" + std::to_string(CK) +
+                                     ") is not divisible by C (" + std::to_string(C) + ")");
+    int K = CK / C;
+
+    auto result = std::make_shared<Tensor>(std::vector<int>{B, C, L_in}, col->device);
+#ifndef AAKAAR_NO_CUDA
+    if (col->device == "cuda")
+        run_cuda_col2im_1d(col, result, B, C, L_in, K, stride, padding, dilation, L_out);
+    else
+#endif
+    run_cpu_col2im_1d(col, result, B, C, L_in, K, stride, padding, dilation, L_out);
+
+    if (g_grad_enabled && col->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {col};
+        node->op_name = "col2im_1d";
+        int K_c = K, S_c = stride, P_c = padding, D_c = dilation, Lo_c = L_out;
+        node->backward_fn = [K_c, S_c, P_c, D_c, Lo_c](std::shared_ptr<Tensor> grad_out) {
+            // col2im's backward is exactly im2col with the same params:
+            // gather back out the same (K positions x L_out) windows that
+            // col2im scattered from — the precise inverse relationship.
+            auto grad_col = dispatch_im2col_1d(grad_out, K_c, S_c, P_c, D_c, Lo_c);
+            return std::vector<std::shared_ptr<Tensor>>{grad_col};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_col2im_2d(std::shared_ptr<Tensor> col, int C, int H_in, int W_in,
+                                                     int SH, int SW, int PH, int PW, int DH, int DW,
+                                                     int OH, int OW) {
+    if (col->shape.size() != 3)
+        throw std::invalid_argument("col2im_2d: expected input of shape (batch, channels*KH*KW, OH*OW), got rank " +
+                                     std::to_string(col->shape.size()));
+    if (col->dtype != DType::FLOAT32)
+        throw std::runtime_error("col2im_2d: only float32 is currently supported.");
+    if (!col->is_contiguous()) col = dispatch_contiguous(col);
+
+    int B = col->shape[0];
+    int CKK = col->shape[1];
+    if (CKK % C != 0)
+        throw std::invalid_argument("col2im_2d: channels*KH*KW is not divisible by C");
+    int KK = CKK / C;
+    int K = (int)std::round(std::sqrt((double)KK));  // assumes square kernel, matches Conv2d's usage
+    if (K * K != KK)
+        throw std::invalid_argument("col2im_2d: cannot infer square kernel size from channel*kernel dimension");
+
+    auto result = std::make_shared<Tensor>(std::vector<int>{B, C, H_in, W_in}, col->device);
+#ifndef AAKAAR_NO_CUDA
+    if (col->device == "cuda")
+        run_cuda_col2im_2d(col, result, B, C, H_in, W_in, K, K, SH, SW, PH, PW, DH, DW, OH, OW);
+    else
+#endif
+    run_cpu_col2im_2d(col, result, B, C, H_in, W_in, K, K, SH, SW, PH, PW, DH, DW, OH, OW);
+
+    if (g_grad_enabled && col->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {col};
+        node->op_name = "col2im_2d";
+        int K_c = K, SH_c = SH, SW_c = SW, PH_c = PH, PW_c = PW, DH_c = DH, DW_c = DW, OH_c = OH, OW_c = OW;
+        node->backward_fn = [K_c, SH_c, SW_c, PH_c, PW_c, DH_c, DW_c, OH_c, OW_c](std::shared_ptr<Tensor> grad_out) {
+            // Exact inverse relationship, same as col2im_1d: col2im's
+            // backward is im2col with the same params.
+            auto grad_col = dispatch_im2col_2d(grad_out, K_c, K_c, SH_c, SW_c, PH_c, PW_c, DH_c, DW_c, OH_c, OW_c);
+            return std::vector<std::shared_ptr<Tensor>>{grad_col};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
+static std::shared_ptr<Tensor> dispatch_col2im_3d(std::shared_ptr<Tensor> col, int C, int D_in, int H_in, int W_in,
+                                                     int SD, int SH, int SW, int PD, int PH, int PW,
+                                                     int DD, int DH, int DW, int OD, int OH, int OW) {
+    if (col->shape.size() != 3)
+        throw std::invalid_argument("col2im_3d: expected input of shape (batch, channels*KD*KH*KW, OD*OH*OW), got rank " +
+                                     std::to_string(col->shape.size()));
+    if (col->dtype != DType::FLOAT32)
+        throw std::runtime_error("col2im_3d: only float32 is currently supported.");
+    if (!col->is_contiguous()) col = dispatch_contiguous(col);
+
+    int B = col->shape[0];
+    int CKKK = col->shape[1];
+    if (CKKK % C != 0)
+        throw std::invalid_argument("col2im_3d: channels*KD*KH*KW is not divisible by C");
+    int KKK = CKKK / C;
+    int K = (int)std::round(std::cbrt((double)KKK));  // assumes cubic kernel, matches Conv3d's usage
+    if (K * K * K != KKK)
+        throw std::invalid_argument("col2im_3d: cannot infer cubic kernel size from channel*kernel dimension");
+
+    auto result = std::make_shared<Tensor>(std::vector<int>{B, C, D_in, H_in, W_in}, col->device);
+#ifndef AAKAAR_NO_CUDA
+    if (col->device == "cuda")
+        run_cuda_col2im_3d(col, result, B, C, D_in, H_in, W_in, K, K, K, SD, SH, SW, PD, PH, PW, DD, DH, DW, OD, OH, OW);
+    else
+#endif
+    run_cpu_col2im_3d(col, result, B, C, D_in, H_in, W_in, K, K, K, SD, SH, SW, PD, PH, PW, DD, DH, DW, OD, OH, OW);
+
+    if (g_grad_enabled && col->requires_grad) {
+        result->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {col};
+        node->op_name = "col2im_3d";
+        int K_c=K, SD_c=SD, SH_c=SH, SW_c=SW, PD_c=PD, PH_c=PH, PW_c=PW, DD_c=DD, DH_c=DH, DW_c=DW, OD_c=OD, OH_c=OH, OW_c=OW;
+        node->backward_fn = [K_c,SD_c,SH_c,SW_c,PD_c,PH_c,PW_c,DD_c,DH_c,DW_c,OD_c,OH_c,OW_c](std::shared_ptr<Tensor> grad_out) {
+            auto grad_col = dispatch_im2col_3d(grad_out, K_c,K_c,K_c, SD_c,SH_c,SW_c, PD_c,PH_c,PW_c, DD_c,DH_c,DW_c, OD_c,OH_c,OW_c);
+            return std::vector<std::shared_ptr<Tensor>>{grad_col};
+        };
+        result->grad_fn = node;
+    }
+    return result;
+}
+
 static std::shared_ptr<Tensor> dispatch_im2col_2d(std::shared_ptr<Tensor> x, int KH, int KW, int SH, int SW,
                                                     int PH, int PW, int DH, int DW, int OH, int OW) {
     if (x->shape.size() != 4)
@@ -1129,6 +1259,50 @@ static std::shared_ptr<Tensor> dispatch_conv1d_cudnn(std::shared_ptr<Tensor> x, 
     return y;
 }
 
+static std::shared_ptr<Tensor> dispatch_conv1d_transpose_cudnn(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
+                                                                 int stride, int padding, int dilation, int L_out) {
+    if (x->device != "cuda" || w->device != "cuda")
+        throw std::runtime_error("conv1d_transpose_cudnn: both input and weight must be on device='cuda'.");
+    if (x->dtype != DType::FLOAT32 || w->dtype != DType::FLOAT32)
+        throw std::runtime_error("conv1d_transpose_cudnn: only float32 is supported.");
+    if (!x->is_contiguous()) x = dispatch_contiguous(x);
+    if (!w->is_contiguous()) w = dispatch_contiguous(w);
+
+    // weight shape: (Cin_t, Cout_t, K) — ConvTranspose1d's declared layout
+    // (note: REVERSED vs plain Conv1d's (Cout, Cin, K)), which happens to
+    // be exactly the shape run_cudnn_conv1d_backward_data's `w` argument
+    // expects for the equivalent "virtual" regular Conv1d whose
+    // backward-data pass this call reuses as ConvTranspose1d's forward.
+    int Cin_t = w->shape[0], Cout_t = w->shape[1], K = w->shape[2];
+    int B = x->shape[0], L_in_x = x->shape[2];
+    if (x->shape[1] != Cin_t)
+        throw std::invalid_argument("conv1d_transpose_cudnn: input channels (" + std::to_string(x->shape[1]) +
+                                     ") don't match weight's in_channels (" + std::to_string(Cin_t) + ")");
+
+    auto y = run_cudnn_conv1d_backward_data(x, w, B, Cout_t, L_out, stride, padding, dilation, L_in_x);
+
+    if (g_grad_enabled && (x->requires_grad || w->requires_grad)) {
+        y->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {x, w};
+        node->op_name = "conv1d_transpose_cudnn";
+        int Cin_c = Cin_t, K_c = K, S_c = stride, P_c = padding, D_c = dilation, Lin_c = L_in_x;
+        node->backward_fn = [x, w, Cin_c, K_c, S_c, P_c, D_c, Lin_c](std::shared_ptr<Tensor> grad_out) {
+            // grad wrt x: the adjoint of backward_data is ordinary forward
+            // convolution — run the virtual conv's plain forward on
+            // upstream grad_out.
+            auto grad_x = run_cudnn_conv1d_forward(grad_out, w, S_c, P_c, D_c, Lin_c);
+            // grad wrt weight: the virtual conv's backward_filter, with
+            // roles swapped — grad_out standing in as "x" and the
+            // transpose's original input standing in as "grad_y".
+            auto grad_w = run_cudnn_conv1d_backward_filter(grad_out, x, Cin_c, K_c, S_c, P_c, D_c, Lin_c);
+            return std::vector<std::shared_ptr<Tensor>>{grad_x, grad_w};
+        };
+        y->grad_fn = node;
+    }
+    return y;
+}
+
 static std::shared_ptr<Tensor> dispatch_conv2d_cudnn(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
                                                        int SH, int SW, int PH, int PW, int DH, int DW) {
     if (x->device != "cuda" || w->device != "cuda")
@@ -1196,6 +1370,81 @@ static std::shared_ptr<Tensor> dispatch_conv3d_cudnn(std::shared_ptr<Tensor> x, 
                              (std::shared_ptr<Tensor> grad_out) {
             auto grad_x = run_cudnn_conv3d_backward_data(grad_out, w, B_c,Cin_c,D_c,H_c,W_c,SD_c,SH_c,SW_c,PD_c,PH_c,PW_c,DD_c,DH_c,DW_c,OD_c,OH_c,OW_c);
             auto grad_w = run_cudnn_conv3d_backward_filter(x, grad_out, Cout_c,KD_c,KH_c,KW_c,SD_c,SH_c,SW_c,PD_c,PH_c,PW_c,DD_c,DH_c,DW_c,OD_c,OH_c,OW_c);
+            return std::vector<std::shared_ptr<Tensor>>{grad_x, grad_w};
+        };
+        y->grad_fn = node;
+    }
+    return y;
+}
+
+static std::shared_ptr<Tensor> dispatch_conv2d_transpose_cudnn(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
+                                                                 int SH, int SW, int PH, int PW, int DH, int DW,
+                                                                 int OH, int OW) {
+    if (x->device != "cuda" || w->device != "cuda")
+        throw std::runtime_error("conv2d_transpose_cudnn: both input and weight must be on device='cuda'.");
+    if (x->dtype != DType::FLOAT32 || w->dtype != DType::FLOAT32)
+        throw std::runtime_error("conv2d_transpose_cudnn: only float32 is supported.");
+    if (!x->is_contiguous()) x = dispatch_contiguous(x);
+    if (!w->is_contiguous()) w = dispatch_contiguous(w);
+
+    // weight: (Cin_t, Cout_t, KH, KW) — reversed vs Conv2d's (Cout,Cin,KH,KW).
+    int Cin_t = w->shape[0], Cout_t = w->shape[1], KH = w->shape[2], KW = w->shape[3];
+    int B = x->shape[0], H_in_x = x->shape[2], W_in_x = x->shape[3];
+    if (x->shape[1] != Cin_t)
+        throw std::invalid_argument("conv2d_transpose_cudnn: input channels don't match weight's in_channels");
+
+    auto y = run_cudnn_conv2d_backward_data(x, w, B, Cout_t, OH, OW, SH, SW, PH, PW, DH, DW,
+                                             H_in_x, W_in_x, /*require_capturable=*/false);
+
+    if (g_grad_enabled && (x->requires_grad || w->requires_grad)) {
+        y->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {x, w};
+        node->op_name = "conv2d_transpose_cudnn";
+        int Cin_c=Cin_t, KH_c=KH, KW_c=KW, SH_c=SH, SW_c=SW, PH_c=PH, PW_c=PW, DH_c=DH, DW_c=DW, Hin_c=H_in_x, Win_c=W_in_x;
+        node->backward_fn = [x, w, Cin_c,KH_c,KW_c,SH_c,SW_c,PH_c,PW_c,DH_c,DW_c,Hin_c,Win_c]
+                             (std::shared_ptr<Tensor> grad_out) {
+            auto grad_x = run_cudnn_conv2d_forward(grad_out, w, SH_c, SW_c, PH_c, PW_c, DH_c, DW_c, Hin_c, Win_c);
+            auto grad_w = run_cudnn_conv2d_backward_filter(grad_out, x, Cin_c, KH_c, KW_c, SH_c, SW_c, PH_c, PW_c,
+                                                            DH_c, DW_c, Hin_c, Win_c, /*require_capturable=*/false);
+            return std::vector<std::shared_ptr<Tensor>>{grad_x, grad_w};
+        };
+        y->grad_fn = node;
+    }
+    return y;
+}
+
+static std::shared_ptr<Tensor> dispatch_conv3d_transpose_cudnn(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
+                                                                 int SD, int SH, int SW, int PD, int PH, int PW,
+                                                                 int DD, int DH, int DW, int OD, int OH, int OW) {
+    if (x->device != "cuda" || w->device != "cuda")
+        throw std::runtime_error("conv3d_transpose_cudnn: both input and weight must be on device='cuda'.");
+    if (x->dtype != DType::FLOAT32 || w->dtype != DType::FLOAT32)
+        throw std::runtime_error("conv3d_transpose_cudnn: only float32 is supported.");
+    if (!x->is_contiguous()) x = dispatch_contiguous(x);
+    if (!w->is_contiguous()) w = dispatch_contiguous(w);
+
+    int Cin_t = w->shape[0], Cout_t = w->shape[1], KD = w->shape[2], KH = w->shape[3], KW = w->shape[4];
+    int B = x->shape[0], D_in_x = x->shape[2], H_in_x = x->shape[3], W_in_x = x->shape[4];
+    if (x->shape[1] != Cin_t)
+        throw std::invalid_argument("conv3d_transpose_cudnn: input channels don't match weight's in_channels");
+
+    auto y = run_cudnn_conv3d_backward_data(x, w, B, Cout_t, OD, OH, OW, SD, SH, SW, PD, PH, PW,
+                                             DD, DH, DW, D_in_x, H_in_x, W_in_x);
+
+    if (g_grad_enabled && (x->requires_grad || w->requires_grad)) {
+        y->requires_grad = true;
+        auto node = std::make_shared<Node>();
+        node->inputs = {x, w};
+        node->op_name = "conv3d_transpose_cudnn";
+        int Cin_c=Cin_t, KD_c=KD, KH_c=KH, KW_c=KW, SD_c=SD, SH_c=SH, SW_c=SW,
+            PD_c=PD, PH_c=PH, PW_c=PW, DD_c=DD, DH_c=DH, DW_c=DW, Din_c=D_in_x, Hin_c=H_in_x, Win_c=W_in_x;
+        node->backward_fn = [x, w, Cin_c,KD_c,KH_c,KW_c,SD_c,SH_c,SW_c,PD_c,PH_c,PW_c,DD_c,DH_c,DW_c,Din_c,Hin_c,Win_c]
+                             (std::shared_ptr<Tensor> grad_out) {
+            auto grad_x = run_cudnn_conv3d_forward(grad_out, w, SD_c, SH_c, SW_c, PD_c, PH_c, PW_c,
+                                                    DD_c, DH_c, DW_c, Din_c, Hin_c, Win_c);
+            auto grad_w = run_cudnn_conv3d_backward_filter(grad_out, x, Cin_c, KD_c, KH_c, KW_c, SD_c, SH_c, SW_c,
+                                                            PD_c, PH_c, PW_c, DD_c, DH_c, DW_c, Din_c, Hin_c, Win_c);
             return std::vector<std::shared_ptr<Tensor>>{grad_x, grad_w};
         };
         y->grad_fn = node;
@@ -2499,6 +2748,17 @@ PYBIND11_MODULE(_C, m) {
     m.def("im2col_1d", &dispatch_im2col_1d,
           py::arg("x"), py::arg("kernel_size"), py::arg("stride"),
           py::arg("padding"), py::arg("dilation"), py::arg("out_length"));
+    m.def("col2im_1d", &dispatch_col2im_1d,
+      py::arg("col"), py::arg("C"), py::arg("L_in"), py::arg("stride"),
+      py::arg("padding"), py::arg("dilation"), py::arg("L_out"));
+    m.def("col2im_2d", &dispatch_col2im_2d,
+      py::arg("col"), py::arg("C"), py::arg("H_in"), py::arg("W_in"),
+      py::arg("SH"), py::arg("SW"), py::arg("PH"), py::arg("PW"), py::arg("DH"), py::arg("DW"),
+      py::arg("OH"), py::arg("OW"));
+    m.def("col2im_3d", &dispatch_col2im_3d,
+      py::arg("col"), py::arg("C"), py::arg("D_in"), py::arg("H_in"), py::arg("W_in"),
+      py::arg("SD"), py::arg("SH"), py::arg("SW"), py::arg("PD"), py::arg("PH"), py::arg("PW"),
+      py::arg("DD"), py::arg("DH"), py::arg("DW"), py::arg("OD"), py::arg("OH"), py::arg("OW"));
     m.def("_huber_loss_fused", &dispatch_huber_loss, py::arg("pred"), py::arg("target"), py::arg("delta") = 1.0f);
     m.def("_cross_entropy_fused", &dispatch_cross_entropy_fused, py::arg("logits"), py::arg("onehot"));
     m.def("_bce_fused", &dispatch_bce_fused, py::arg("pred"), py::arg("target"));
@@ -2554,6 +2814,8 @@ PYBIND11_MODULE(_C, m) {
 #ifdef AAKAAR_HAS_CUDNN
     m.def("conv1d_cudnn", &dispatch_conv1d_cudnn,
           py::arg("x"), py::arg("w"), py::arg("stride"), py::arg("padding"), py::arg("dilation"));
+    m.def("conv1d_transpose_cudnn", &dispatch_conv1d_transpose_cudnn,
+      py::arg("x"), py::arg("w"), py::arg("stride"), py::arg("padding"), py::arg("dilation"), py::arg("L_out"));
     m.def("_set_cudnn_tf32_enabled", &set_cudnn_tf32_enabled);
     m.def("_get_cudnn_tf32_enabled", &get_cudnn_tf32_enabled);
     m.def("_conv1d_forward_into", &run_cudnn_conv1d_forward_into);
@@ -2572,6 +2834,13 @@ PYBIND11_MODULE(_C, m) {
     m.def("conv3d_cudnn", &dispatch_conv3d_cudnn,
       py::arg("x"), py::arg("w"), py::arg("SD"), py::arg("SH"), py::arg("SW"),
       py::arg("PD"), py::arg("PH"), py::arg("PW"), py::arg("DD"), py::arg("DH"), py::arg("DW"));
+    m.def("conv2d_transpose_cudnn", &dispatch_conv2d_transpose_cudnn,
+      py::arg("x"), py::arg("w"), py::arg("SH"), py::arg("SW"), py::arg("PH"), py::arg("PW"),
+      py::arg("DH"), py::arg("DW"), py::arg("OH"), py::arg("OW"));
+    m.def("conv3d_transpose_cudnn", &dispatch_conv3d_transpose_cudnn,
+      py::arg("x"), py::arg("w"), py::arg("SD"), py::arg("SH"), py::arg("SW"),
+      py::arg("PD"), py::arg("PH"), py::arg("PW"), py::arg("DD"), py::arg("DH"), py::arg("DW"),
+      py::arg("OD"), py::arg("OH"), py::arg("OW"));
     m.def("_warm_cudnn", &warm_cudnn);
     m.attr("HAS_CUDNN") = true;
 #else

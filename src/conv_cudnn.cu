@@ -112,7 +112,7 @@ static void destroy_descs(Conv1dDescs& d) {
 }
 
 std::shared_ptr<Tensor> run_cudnn_conv1d_forward(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> w,
-                                                   int stride, int padding, int dilation, int L_out) {
+                                                 int stride, int padding, int dilation, int L_out) {
     int B = x->shape[0], C_in = x->shape[1], L_in = x->shape[2];
     int C_out = w->shape[0], K = w->shape[2];
     std::vector<int> key = {B, C_in, L_in, C_out, K, stride, padding, dilation, L_out};
@@ -159,10 +159,65 @@ std::shared_ptr<Tensor> run_cudnn_conv1d_forward(std::shared_ptr<Tensor> x, std:
         // silently ranked) rather than blindly trusting index 0.
         int best = -1;
         for (int i = 0; i < returned; ++i) {
-            if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
+            if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+            
+            // FFT-based algorithms (FFT, FFT_TILING) decompose one logical
+            // convolution into many small kernel launches internally (confirmed
+            // via nsys for this exact shape: FFT_TILING launched ~30 kernels for
+            // a single "forward" call, vs 1 kernel for GEMM/direct-based
+            // algorithms). cuDNN's own algorithm-search timing measures one
+            // isolated execution and does not capture this — so a narrow
+            // "fastest in search" win for an FFT algorithm can be dramatically
+            // slower in real repeated-call use, especially under Windows/WDDM's
+            // high per-launch overhead. Skip them in favor of the next candidate.
+            if (perf_results[i].algo == CUDNN_CONVOLUTION_FWD_ALGO_FFT ||
+                perf_results[i].algo == CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING) continue;
+            best = i;
+            break;
         }
+
+        if (best == -1) {
+            // No non-FFT candidate succeeded — fall back to the fastest overall,
+            // even if it's FFT-based, rather than failing outright.
+            for (int i = 0; i < returned; ++i) {
+                if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
+            }
+        }
+
+        if (best != -1) {
+            int chosen = best;
+            if (chosen != -1) {
+                int best_small = -1;
+                for (int i = 0; i < returned; ++i) {
+                    if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+                    if (perf_results[i].algo == CUDNN_CONVOLUTION_FWD_ALGO_FFT ||
+                        perf_results[i].algo == CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING) continue;
+                    // Widened to 1.5x (from 1.25x) specifically because cuDNN's
+                    // one-shot search timing is noisy enough, run to run, that a
+                    // tighter margin caused this exact tiebreak to flip between two
+                    // candidates non-deterministically across separate process runs
+                    // at the same shape -- confirmed directly: two candidates whose
+                    // true costs are close enough that measurement noise alone moved
+                    // one in and out of a 1.25x window across six back-to-back runs.
+                    bool much_smaller_workspace = perf_results[i].memory < perf_results[best].memory / 10;
+                    bool close_enough_time = perf_results[i].time <= perf_results[best].time * 1.5;
+                    if (much_smaller_workspace && close_enough_time) {
+                        // Among all qualifying candidates, deterministically prefer
+                        // the smallest workspace, not just the first one encountered
+                        // in the (fastest-first) sorted order -- removes order/noise
+                        // dependence entirely for the final choice.
+                        if (best_small == -1 || perf_results[i].memory < perf_results[best_small].memory) {
+                            best_small = i;
+                        }
+                    }
+                }
+                if (best_small != -1) chosen = best_small;
+            }
+            best = chosen;
+        }
+
         if (best == -1)
-            throw std::runtime_error("conv1d_cudnn: all forward algorithm candidates reported failure status.");
+            throw std::runtime_error("conv1d_cudnn: no forward algorithm candidates succeeded during search.");
             
         if (aakaar_cudnn_debug_enabled()) {
             fprintf(stderr, "[conv1d_cudnn] shape=(%d,%d,%d)->(%d,%d,%d) K=%d chosen algo=%d time=%.4fms workspace=%zuMB\n",
@@ -198,8 +253,8 @@ std::shared_ptr<Tensor> run_cudnn_conv1d_forward(std::shared_ptr<Tensor> x, std:
 }
 
 std::shared_ptr<Tensor> run_cudnn_conv1d_backward_data(std::shared_ptr<Tensor> grad_y, std::shared_ptr<Tensor> w,
-                                                         int B, int C_in, int L_in, int stride, int padding,
-                                                         int dilation, int L_out) {
+                                                       int B, int C_in, int L_in, int stride, int padding,
+                                                       int dilation, int L_out) {
     int C_out = w->shape[0], K = w->shape[2];
     std::vector<int> key = {B, C_in, L_in, C_out, K, stride, padding, dilation, L_out};
 
@@ -210,7 +265,8 @@ std::shared_ptr<Tensor> run_cudnn_conv1d_backward_data(std::shared_ptr<Tensor> g
         entry.descs = make_descs(B, C_in, L_in, C_out, K, stride, padding, dilation, L_out);
 
         // Apply TF32 math type preference
-        cudnnMathType_t math = get_tf32_enabled() ? CUDNN_TENSOR_OP_MATH : CUDNN_FMA_MATH;
+        extern bool get_cudnn_tf32_enabled();
+        cudnnMathType_t math = get_cudnn_tf32_enabled() ? CUDNN_TENSOR_OP_MATH : CUDNN_FMA_MATH;
         check_cudnn(cudnnSetConvolutionMathType(entry.descs.convDesc, math), "set math type");
 
         auto grad_x_probe = std::make_shared<Tensor>(std::vector<int>{B, C_in, L_in}, std::string("cuda"));
@@ -232,10 +288,25 @@ std::shared_ptr<Tensor> run_cudnn_conv1d_backward_data(std::shared_ptr<Tensor> g
         if (returned == 0)
             throw std::runtime_error("conv1d_cudnn: no backward-data algorithm candidates succeeded during search.");
 
+        // perf_results is sorted fastest-first, but skip FFT-based algorithms
         int best = -1;
         for (int i = 0; i < returned; ++i) {
-            if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
+            if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+            
+            // Skip FFT-based algorithms due to high per-launch overhead
+            if (perf_results[i].algo == CUDNN_CONVOLUTION_BWD_DATA_ALGO_FFT ||
+                perf_results[i].algo == CUDNN_CONVOLUTION_BWD_DATA_ALGO_FFT_TILING) continue;
+            best = i;
+            break;
         }
+
+        if (best == -1) {
+            // No non-FFT candidate succeeded — fall back to the fastest overall
+            for (int i = 0; i < returned; ++i) {
+                if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
+            }
+        }
+
         if (best == -1)
             throw std::runtime_error("conv1d_cudnn: all backward-data algorithm candidates reported failure status.");
             
@@ -271,9 +342,10 @@ std::shared_ptr<Tensor> run_cudnn_conv1d_backward_data(std::shared_ptr<Tensor> g
     return grad_x;
 }
 
+
 std::shared_ptr<Tensor> run_cudnn_conv1d_backward_filter(std::shared_ptr<Tensor> x, std::shared_ptr<Tensor> grad_y,
-                                                           int C_out, int K, int stride, int padding,
-                                                           int dilation, int L_out) {
+                                                         int C_out, int K, int stride, int padding,
+                                                         int dilation, int L_out) {
     int B = x->shape[0], C_in = x->shape[1], L_in = x->shape[2];
     std::vector<int> key = {B, C_in, L_in, C_out, K, stride, padding, dilation, L_out};
 
@@ -284,7 +356,8 @@ std::shared_ptr<Tensor> run_cudnn_conv1d_backward_filter(std::shared_ptr<Tensor>
         entry.descs = make_descs(B, C_in, L_in, C_out, K, stride, padding, dilation, L_out);
 
         // Apply TF32 math type preference
-        cudnnMathType_t math = get_tf32_enabled() ? CUDNN_TENSOR_OP_MATH : CUDNN_FMA_MATH;
+        extern bool get_cudnn_tf32_enabled();
+        cudnnMathType_t math = get_cudnn_tf32_enabled() ? CUDNN_TENSOR_OP_MATH : CUDNN_FMA_MATH;
         check_cudnn(cudnnSetConvolutionMathType(entry.descs.convDesc, math), "set math type");
 
         auto grad_w_probe = std::make_shared<Tensor>(std::vector<int>{C_out, C_in, K}, std::string("cuda"));
@@ -306,10 +379,25 @@ std::shared_ptr<Tensor> run_cudnn_conv1d_backward_filter(std::shared_ptr<Tensor>
         if (returned == 0)
             throw std::runtime_error("conv1d_cudnn: no backward-filter algorithm candidates succeeded during search.");
 
+        // perf_results is sorted fastest-first, but skip FFT-based algorithms
         int best = -1;
         for (int i = 0; i < returned; ++i) {
-            if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
+            if (perf_results[i].status != CUDNN_STATUS_SUCCESS) continue;
+            
+            // Skip FFT-based algorithms due to high per-launch overhead
+            if (perf_results[i].algo == CUDNN_CONVOLUTION_BWD_FILTER_ALGO_FFT ||
+                perf_results[i].algo == CUDNN_CONVOLUTION_BWD_FILTER_ALGO_FFT_TILING) continue;
+            best = i;
+            break;
         }
+
+        if (best == -1) {
+            // No non-FFT candidate succeeded — fall back to the fastest overall
+            for (int i = 0; i < returned; ++i) {
+                if (perf_results[i].status == CUDNN_STATUS_SUCCESS) { best = i; break; }
+            }
+        }
+
         if (best == -1)
             throw std::runtime_error("conv1d_cudnn: all backward-filter algorithm candidates reported failure status.");
             

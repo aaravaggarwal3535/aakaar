@@ -386,3 +386,134 @@ def conv3d(x, weight, stride=(1, 1, 1), padding=(0, 0, 0), dilation=(1, 1, 1)):
     w_flat = weight.reshape([C_out, C_in * KD * KH * KW]).reshape([1, C_out, C_in * KD * KH * KW])
     out = matmul(w_flat, col)  # (B, C_out, OD*OH*OW)
     return out.reshape([B, C_out, OD, OH, OW])
+
+def col2im_1d(col, C, L_in, stride, padding, dilation, out_length):
+    """Scatters a (B, C*K, L_out) column tensor back into a (B, C, L_in)
+    tensor, summing overlapping contributions. Exact inverse of im2col_1d
+    — internal primitive used by conv_transpose1d's im2col fallback path,
+    not usually called directly."""
+    return _C.col2im_1d(col, C, L_in, stride, padding, dilation, out_length)
+
+
+def conv_transpose1d(x, weight, stride=1, padding=0, output_padding=0, dilation=1):
+    """1D transposed convolution ("deconvolution"). weight shape is
+    (in_channels, out_channels, kernel_size) — the REVERSE of conv1d's
+    (out_channels, in_channels, kernel_size), matching torch's
+    ConvTranspose1d convention.
+
+    Implemented as the mathematical adjoint of ordinary conv1d: routes to
+    cuDNN by reusing conv1d's existing forward/backward-data/backward-
+    filter kernels (transposed convolution's forward pass IS regular
+    convolution's backward-data pass — no new cuDNN code needed), or an
+    im2col/col2im + matmul fallback otherwise.
+
+    output_padding is not yet supported (raises NotImplementedError) —
+    real, tracked gap (needs a standalone pad primitive this codebase
+    doesn't have yet), flagged rather than silently ignored."""
+    if output_padding != 0:
+        raise NotImplementedError(
+            "conv_transpose1d: output_padding != 0 is not yet implemented. "
+            "This is a real, tracked gap (needs a standalone pad primitive "
+            "this codebase doesn't have yet), not silently ignored."
+        )
+
+    Cin_t, Cout_t, K = weight.shape
+    B, C_in_x, L_in = x.shape
+    if C_in_x != Cin_t:
+        raise ValueError(f"conv_transpose1d: expected {Cin_t} input channels, got {C_in_x}")
+
+    L_out = (L_in - 1) * stride - 2 * padding + dilation * (K - 1) + 1
+
+    use_cudnn = (getattr(_C, "HAS_CUDNN", False) and x.device == "cuda" and weight.device == "cuda"
+                 and x.dtype == "float32" and weight.dtype == "float32")
+    if use_cudnn:
+        return _C.conv1d_transpose_cudnn(x, weight, stride, padding, dilation, L_out)
+
+    # im2col fallback: col = weight_flat^T @ x (per-batch matmul), then
+    # col2im scatters the (B, Cout_t*K, L_in) column tensor into
+    # (B, Cout_t, L_out), summing overlaps — the exact inverse of how
+    # conv1d's forward builds its column tensor via im2col.
+    w_flat = weight.reshape([Cin_t, Cout_t * K])
+    w_flat_T = w_flat.transpose(0, 1).reshape([1, Cout_t * K, Cin_t])
+    col = matmul(w_flat_T, x)  # (B, Cout_t*K, L_in)
+    return col2im_1d(col, Cout_t, L_out, stride, padding, dilation, L_in)
+
+def col2im_2d(col, C, H_in, W_in, stride, padding, dilation, out_size):
+    SH, SW = stride
+    PH, PW = padding
+    DH, DW = dilation
+    OH, OW = out_size
+    return _C.col2im_2d(col, C, H_in, W_in, SH, SW, PH, PW, DH, DW, OH, OW)
+
+def col2im_3d(col, C, D_in, H_in, W_in, stride, padding, dilation, out_size):
+    SD, SH, SW = stride
+    PD, PH, PW = padding
+    DD, DH, DW = dilation
+    OD, OH, OW = out_size
+    return _C.col2im_3d(col, C, D_in, H_in, W_in, SD, SH, SW, PD, PH, PW, DD, DH, DW, OD, OH, OW)
+
+
+def conv_transpose2d(x, weight, stride=(1, 1), padding=(0, 0), output_padding=(0, 0), dilation=(1, 1)):
+    """2D transposed convolution. weight: (in_channels, out_channels, KH, KW)
+    — reversed vs conv2d's (out_channels, in_channels, KH, KW). See
+    conv_transpose1d's docstring for the adjoint-of-conv2d implementation
+    rationale. output_padding not yet supported."""
+    if output_padding != (0, 0) and output_padding != 0:
+        raise NotImplementedError(
+            "conv_transpose2d: output_padding != 0 is not yet implemented. "
+            "Real, tracked gap — needs a standalone pad primitive this codebase doesn't have yet."
+        )
+    SH, SW = (stride, stride) if isinstance(stride, int) else stride
+    PH, PW = (padding, padding) if isinstance(padding, int) else padding
+    DH, DW = (dilation, dilation) if isinstance(dilation, int) else dilation
+
+    Cin_t, Cout_t, KH, KW = weight.shape
+    B, C_in_x, H_in, W_in = x.shape
+    if C_in_x != Cin_t:
+        raise ValueError(f"conv_transpose2d: expected {Cin_t} input channels, got {C_in_x}")
+
+    OH = (H_in - 1) * SH - 2 * PH + DH * (KH - 1) + 1
+    OW = (W_in - 1) * SW - 2 * PW + DW * (KW - 1) + 1
+
+    use_cudnn = (getattr(_C, "HAS_CUDNN", False) and x.device == "cuda" and weight.device == "cuda"
+                 and x.dtype == "float32" and weight.dtype == "float32")
+    if use_cudnn:
+        return _C.conv2d_transpose_cudnn(x, weight, SH, SW, PH, PW, DH, DW, OH, OW)
+
+    w_flat = weight.reshape([Cin_t, Cout_t * KH * KW])
+    w_flat_T = w_flat.transpose(0, 1).reshape([1, Cout_t * KH * KW, Cin_t])
+    col = matmul(w_flat_T, x.reshape([B, Cin_t, H_in * W_in]))  # (B, Cout_t*KH*KW, H_in*W_in)
+    return col2im_2d(col, Cout_t, OH, OW, (SH, SW), (PH, PW), (DH, DW), (H_in, W_in))
+
+
+def conv_transpose3d(x, weight, stride=(1, 1, 1), padding=(0, 0, 0), output_padding=(0, 0, 0), dilation=(1, 1, 1)):
+    """3D transposed convolution. weight: (in_channels, out_channels, KD, KH, KW)
+    — reversed vs conv3d's (out_channels, in_channels, KD, KH, KW).
+    output_padding not yet supported."""
+    if output_padding != (0, 0, 0) and output_padding != 0:
+        raise NotImplementedError(
+            "conv_transpose3d: output_padding != 0 is not yet implemented. "
+            "Real, tracked gap — needs a standalone pad primitive this codebase doesn't have yet."
+        )
+    SD, SH, SW = (stride, stride, stride) if isinstance(stride, int) else stride
+    PD, PH, PW = (padding, padding, padding) if isinstance(padding, int) else padding
+    DD, DH, DW = (dilation, dilation, dilation) if isinstance(dilation, int) else dilation
+
+    Cin_t, Cout_t, KD, KH, KW = weight.shape
+    B, C_in_x, D_in, H_in, W_in = x.shape
+    if C_in_x != Cin_t:
+        raise ValueError(f"conv_transpose3d: expected {Cin_t} input channels, got {C_in_x}")
+
+    OD = (D_in - 1) * SD - 2 * PD + DD * (KD - 1) + 1
+    OH = (H_in - 1) * SH - 2 * PH + DH * (KH - 1) + 1
+    OW = (W_in - 1) * SW - 2 * PW + DW * (KW - 1) + 1
+
+    use_cudnn = (getattr(_C, "HAS_CUDNN", False) and x.device == "cuda" and weight.device == "cuda"
+                 and x.dtype == "float32" and weight.dtype == "float32")
+    if use_cudnn:
+        return _C.conv3d_transpose_cudnn(x, weight, SD, SH, SW, PD, PH, PW, DD, DH, DW, OD, OH, OW)
+
+    w_flat = weight.reshape([Cin_t, Cout_t * KD * KH * KW])
+    w_flat_T = w_flat.transpose(0, 1).reshape([1, Cout_t * KD * KH * KW, Cin_t])
+    col = matmul(w_flat_T, x.reshape([B, Cin_t, D_in * H_in * W_in]))
+    return col2im_3d(col, Cout_t, OD, OH, OW, (SD, SH, SW), (PD, PH, PW), (DD, DH, DW), (D_in, H_in, W_in))
