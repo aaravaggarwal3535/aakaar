@@ -6,48 +6,48 @@
 template <typename T>
 __global__ void im2col_1d_kernel(const T* __restrict__ x, T* __restrict__ col,
                                   int B, int C, int L_in, int K, int S, int P, int D, int L_out) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * C * K * L_out;
-    if (idx >= total) return;
+    long long idx = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    long long stride = (long long)blockDim.x * gridDim.x;
+    long long total = (long long)B * C * K * L_out;
 
-    // Layout matches col's (B, C*K, L_out) row-major storage: o fastest, then k, then c, then b.
-    int o = idx % L_out;
-    int tmp = idx / L_out;
-    int k = tmp % K;
-    tmp /= K;
-    int c = tmp % C;
-    int b = tmp / C;
+    for (; idx < total; idx += stride) {
+        int o = idx % L_out;
+        long long tmp = idx / L_out;
+        int k = tmp % K; tmp /= K;
+        int c = tmp % C;
+        int b = tmp / C;
 
-    int in_pos = o * S - P + k * D;
-    T val = T(0);
-    if (in_pos >= 0 && in_pos < L_in) val = x[((size_t)b * C + c) * L_in + in_pos];
-    col[idx] = val;
+        int in_pos = o * S - P + k * D;
+        T val = T(0);
+        if (in_pos >= 0 && in_pos < L_in) val = x[((size_t)b * C + c) * L_in + in_pos];
+        col[idx] = val;
+    }
 }
 
-// Gather-based backward: each thread owns one grad_x element and sums the
-// (at most K) col entries that could have read from it. No atomics needed.
 template <typename T>
 __global__ void col2im_1d_kernel(const T* __restrict__ grad_col, T* __restrict__ grad_x,
                                   int B, int C, int L_in, int K, int S, int P, int D, int L_out) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * C * L_in;
-    if (idx >= total) return;
+    long long idx = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    long long stride = (long long)blockDim.x * gridDim.x;
+    long long total = (long long)B * C * L_in;
 
-    int i = idx % L_in;
-    int tmp = idx / L_in;
-    int c = tmp % C;
-    int b = tmp / C;
+    for (; idx < total; idx += stride) {
+        int i = idx % L_in;
+        long long tmp = idx / L_in;
+        int c = tmp % C;
+        int b = tmp / C;
 
-    const T* gc_base = grad_col + ((size_t)(b * C + c) * K) * L_out;
-    T acc = T(0);
-    for (int k = 0; k < K; ++k) {
-        int numer = i + P - k * D;
-        if (numer < 0 || numer % S != 0) continue;
-        int o = numer / S;
-        if (o < 0 || o >= L_out) continue;
-        acc += gc_base[(size_t)k * L_out + o];
+        const T* gc_base = grad_col + ((size_t)(b * C + c) * K) * L_out;
+        T acc = T(0);
+        for (int k = 0; k < K; ++k) {
+            int numer = i + P - k * D;
+            if (numer < 0 || numer % S != 0) continue;
+            int o = numer / S;
+            if (o < 0 || o >= L_out) continue;
+            acc += gc_base[(size_t)k * L_out + o];
+        }
+        grad_x[idx] = acc;
     }
-    grad_x[idx] = acc;
 }
 
 static int conv_blocks(int n) {

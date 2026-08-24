@@ -517,3 +517,55 @@ def conv_transpose3d(x, weight, stride=(1, 1, 1), padding=(0, 0, 0), output_padd
     w_flat_T = w_flat.transpose(0, 1).reshape([1, Cout_t * KD * KH * KW, Cin_t])
     col = matmul(w_flat_T, x.reshape([B, Cin_t, D_in * H_in * W_in]))
     return col2im_3d(col, Cout_t, OD, OH, OW, (SD, SH, SW), (PD, PH, PW), (DD, DH, DW), (D_in, H_in, W_in))
+
+def unfold(x, kernel_size, dilation=1, padding=0, stride=1):
+    """Extracts sliding local (kernel_size) blocks from a 4D (N, C, H, W)
+    tensor into a (N, C*KH*KW, L) tensor, where L = OH*OW is the number
+    of block positions -- matches torch.nn.functional.unfold exactly.
+    This is precisely Conv2d's im2col step exposed as a standalone op;
+    reuses the existing im2col_2d primitive, no new kernels."""
+    KH, KW = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
+    SH, SW = (stride, stride) if isinstance(stride, int) else stride
+    PH, PW = (padding, padding) if isinstance(padding, int) else padding
+    DH, DW = (dilation, dilation) if isinstance(dilation, int) else dilation
+
+    if len(x.shape) != 4:
+        raise ValueError(f"unfold expects a 4D (N, C, H, W) input, got shape {x.shape}")
+    B, C, H, W = x.shape
+    OH = (H + 2 * PH - DH * (KH - 1) - 1) // SH + 1
+    OW = (W + 2 * PW - DW * (KW - 1) - 1) // SW + 1
+    if OH <= 0 or OW <= 0:
+        raise ValueError(f"unfold: computed output size ({OH},{OW}) <= 0")
+    return im2col_2d(x, KH, KW, SH, SW, PH, PW, DH, DW, OH, OW)
+
+
+def fold(x, output_size, kernel_size, dilation=1, padding=0, stride=1):
+    """Combines an array of sliding local blocks (as produced by unfold)
+    into a (N, C, output_size[0], output_size[1]) tensor, summing
+    overlapping contributions -- matches torch.nn.functional.fold
+    exactly. This is precisely col2im (the adjoint of unfold/im2col)
+    exposed as a standalone op; reuses the existing col2im_2d primitive
+    added for ConvTranspose2d, no new kernels."""
+    OH_out, OW_out = (output_size, output_size) if isinstance(output_size, int) else output_size
+    KH, KW = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
+    SH, SW = (stride, stride) if isinstance(stride, int) else stride
+    PH, PW = (padding, padding) if isinstance(padding, int) else padding
+    DH, DW = (dilation, dilation) if isinstance(dilation, int) else dilation
+
+    if len(x.shape) != 3:
+        raise ValueError(f"fold expects a 3D (N, C*KH*KW, L) input, got shape {x.shape}")
+
+    OH = (OH_out + 2 * PH - DH * (KH - 1) - 1) // SH + 1
+    OW = (OW_out + 2 * PW - DW * (KW - 1) - 1) // SW + 1
+    L = x.shape[2]
+    if OH * OW != L:
+        raise ValueError(f"fold: kernel/stride/padding/dilation imply {OH}x{OW}={OH*OW} "
+                          f"blocks, but input has L={L}")
+
+    C_total = x.shape[1]
+    if C_total % (KH * KW) != 0:
+        raise ValueError(f"fold: channel dim {C_total} is not divisible by "
+                          f"kernel_size product {KH*KW}")
+    C = C_total // (KH * KW)
+
+    return col2im_2d(x, C, OH_out, OW_out, (SH, SW), (PH, PW), (DH, DW), (OH, OW))

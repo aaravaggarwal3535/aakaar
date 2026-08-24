@@ -8,24 +8,26 @@ __global__ void im2col_2d_kernel(const T* __restrict__ x, T* __restrict__ col,
                                   int B, int C, int H, int W, int KH, int KW,
                                   int SH, int SW, int PH, int PW, int DH, int DW,
                                   int OH, int OW) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    long long idx = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    long long stride = (long long)blockDim.x * gridDim.x;
     long long total = (long long)B * C * KH * KW * OH * OW;
-    if (idx >= total) return;
 
-    int ow = idx % OW;
-    long long tmp = idx / OW;
-    int oh = tmp % OH; tmp /= OH;
-    int kw = tmp % KW; tmp /= KW;
-    int kh = tmp % KH; tmp /= KH;
-    int c = tmp % C;
-    int b = tmp / C;
+    for (; idx < total; idx += stride) {
+        int ow = idx % OW;
+        long long tmp = idx / OW;
+        int oh = tmp % OH; tmp /= OH;
+        int kw = tmp % KW; tmp /= KW;
+        int kh = tmp % KH; tmp /= KH;
+        int c = tmp % C;
+        int b = tmp / C;
 
-    int in_h = oh * SH - PH + kh * DH;
-    int in_w = ow * SW - PW + kw * DW;
-    T val = T(0);
-    if (in_h >= 0 && in_h < H && in_w >= 0 && in_w < W)
-        val = x[(((size_t)b * C + c) * H + in_h) * W + in_w];
-    col[idx] = val;
+        int in_h = oh * SH - PH + kh * DH;
+        int in_w = ow * SW - PW + kw * DW;
+        T val = T(0);
+        if (in_h >= 0 && in_h < H && in_w >= 0 && in_w < W)
+            val = x[(((size_t)b * C + c) * H + in_h) * W + in_w];
+        col[idx] = val;
+    }
 }
 
 template <typename T>
@@ -33,33 +35,35 @@ __global__ void col2im_2d_kernel(const T* __restrict__ grad_col, T* __restrict__
                                   int B, int C, int H, int W, int KH, int KW,
                                   int SH, int SW, int PH, int PW, int DH, int DW,
                                   int OH, int OW) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    long long idx = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    long long stride = (long long)blockDim.x * gridDim.x;
     long long total = (long long)B * C * H * W;
-    if (idx >= total) return;
 
-    int iw = idx % W;
-    long long tmp = idx / W;
-    int ih = tmp % H; tmp /= H;
-    int c = tmp % C;
-    int b = tmp / C;
+    for (; idx < total; idx += stride) {
+        int iw = idx % W;
+        long long tmp = idx / W;
+        int ih = tmp % H; tmp /= H;
+        int c = tmp % C;
+        int b = tmp / C;
 
-    const T* gc_base = grad_col + ((size_t)(b * C + c)) * KH * KW * OH * OW;
-    T acc = T(0);
-    for (int kh = 0; kh < KH; ++kh) {
-        int numer_h = ih + PH - kh * DH;
-        if (numer_h < 0 || numer_h % SH != 0) continue;
-        int oh = numer_h / SH;
-        if (oh < 0 || oh >= OH) continue;
-        for (int kw = 0; kw < KW; ++kw) {
-            int numer_w = iw + PW - kw * DW;
-            if (numer_w < 0 || numer_w % SW != 0) continue;
-            int ow = numer_w / SW;
-            if (ow < 0 || ow >= OW) continue;
-            int k_idx = kh * KW + kw;
-            acc += gc_base[(size_t)k_idx * OH * OW + oh * OW + ow];
+        const T* gc_base = grad_col + ((size_t)(b * C + c)) * KH * KW * OH * OW;
+        T acc = T(0);
+        for (int kh = 0; kh < KH; ++kh) {
+            int numer_h = ih + PH - kh * DH;
+            if (numer_h < 0 || numer_h % SH != 0) continue;
+            int oh = numer_h / SH;
+            if (oh < 0 || oh >= OH) continue;
+            for (int kw = 0; kw < KW; ++kw) {
+                int numer_w = iw + PW - kw * DW;
+                if (numer_w < 0 || numer_w % SW != 0) continue;
+                int ow = numer_w / SW;
+                if (ow < 0 || ow >= OW) continue;
+                int k_idx = kh * KW + kw;
+                acc += gc_base[(size_t)k_idx * OH * OW + oh * OW + ow];
+            }
         }
+        grad_x[idx] = acc;
     }
-    grad_x[idx] = acc;
 }
 
 static int conv2d_blocks(long long n) {

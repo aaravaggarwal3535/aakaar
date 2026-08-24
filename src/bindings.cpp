@@ -2422,22 +2422,43 @@ static std::shared_ptr<Tensor> tensor_from_numpy_typed(py::array arr, std::strin
 
 #ifndef AAKAAR_NO_CUDA
     if (device == "cuda") {
-        // Route through a reusable pinned staging buffer + a genuinely
-        // async copy, instead of a synchronous cudaMemcpy straight from
-        // pageable numpy memory. A pageable-source cudaMemcpy forces the
-        // CUDA driver to silently allocate its own temporary pinned
-        // buffer, stage into it, DMA, then tear it down — every single
-        // call. On Windows/WDDM that hidden per-call allocation, not the
-        // DMA itself, is what dominates. Pinning a persistent, size-keyed,
-        // reused buffer removes that cost and lets this call return before
-        // the transfer completes, so subsequent same-stream work (kernel
-        // launches, which all run on the default stream here) overlaps
-        // with it instead of stalling behind it.
-        auto& pinned = PinnedAllocator::get_instance();
-        auto pbuf = pinned.acquire(bytes);
-        std::memcpy(pbuf.ptr, cbuf.ptr, bytes);  // host-to-host; microseconds even at MB scale
-        cudaMemcpyAsync(result->data_ptr, pbuf.ptr, bytes, cudaMemcpyHostToDevice, 0);
-        pinned.release(bytes, pbuf, 0);
+        // Pinned-staging path (see PinnedAllocator) is a clear win for
+        // small/frequently-repeated transfers -- it avoids the CUDA
+        // driver's own hidden per-call pinned allocation for a pageable
+        // source. But it pays a full host-to-host memcpy proportional to
+        // buffer size every time, which at large one-off sizes (confirmed:
+        // ~925MB Unfold/Fold column tensors) costs MORE than just letting
+        // the driver do its own internal staging once. Threshold-switch
+        // between the two strategies rather than assuming one wins at
+        // every size -- default chosen conservatively above every shape
+        // measured so far this session (largest confirmed-good pinned
+        // transfer was ~100MB for Conv2d's big benchmark); override via
+        // AAKAAR_PINNED_COPY_MAX_MB if a different crossover point is
+        // measured to work better for a specific workload/GPU.
+        static size_t threshold_bytes = []() -> size_t {
+            size_t default_mb = 256;
+            if (const char* env = std::getenv("AAKAAR_PINNED_COPY_MAX_MB")) {
+                long mb = std::strtol(env, nullptr, 10);
+                if (mb > 0) default_mb = (size_t)mb;
+            }
+            return default_mb * 1024ull * 1024ull;
+        }();
+
+        if (bytes <= threshold_bytes) {
+            auto& pinned = PinnedAllocator::get_instance();
+            auto pbuf = pinned.acquire(bytes);
+            std::memcpy(pbuf.ptr, cbuf.ptr, bytes);
+            cudaMemcpyAsync(result->data_ptr, pbuf.ptr, bytes, cudaMemcpyHostToDevice, 0);
+            pinned.release(bytes, pbuf, 0);
+        } else {
+            // Large one-off transfer: skip our own staging copy, let the
+            // driver manage pageable-source staging directly. This call
+            // is synchronous (unlike the async path above), which is
+            // fine -- at this size the transfer itself dominates total
+            // time regardless, so there's negligible overlap opportunity
+            // being given up.
+            cudaMemcpy(result->data_ptr, cbuf.ptr, bytes, cudaMemcpyHostToDevice);
+        }
         result->requires_grad = requires_grad;
         return result;
     }

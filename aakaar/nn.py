@@ -380,3 +380,37 @@ class ConvTranspose3d:
 
     def parameters(self):
         return [self.weight, self.bias] if self.has_bias else [self.weight]
+
+class Unfold:
+    """Extracts sliding local blocks from a batched input tensor —
+    stateless (no learnable parameters), matches torch.nn.Unfold. Reuses
+    the existing im2col_2d primitive; no new low-level kernels."""
+    def __init__(self, kernel_size, dilation=1, padding=0, stride=1):
+        self.kernel_size = kernel_size
+        self.dilation = dilation
+        self.padding = padding
+        self.stride = stride
+
+    def __call__(self, x):
+        return aakaar.unfold(x, self.kernel_size, self.dilation, self.padding, self.stride)
+
+    def parameters(self):
+        return []
+
+
+class Fold:
+    """Combines an array of sliding local blocks into a batched output
+    tensor, summing overlaps — stateless, matches torch.nn.Fold. Reuses
+    the existing col2im_2d primitive; no new low-level kernels."""
+    def __init__(self, output_size, kernel_size, dilation=1, padding=0, stride=1):
+        self.output_size = output_size
+        self.kernel_size = kernel_size
+        self.dilation = dilation
+        self.padding = padding
+        self.stride = stride
+
+    def __call__(self, x):
+        return aakaar.fold(x, self.output_size, self.kernel_size, self.dilation, self.padding, self.stride)
+
+    def parameters(self):
+        return []
